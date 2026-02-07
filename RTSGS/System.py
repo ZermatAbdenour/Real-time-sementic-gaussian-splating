@@ -3,10 +3,13 @@ import threading
 from RTSGS.GUI.WindowManager import WindowManager
 from RTSGS.GaussianSplatting.PointCloud import PointCloud
 from RTSGS.DataLoader.DataLoader import DataLoader
+from RTSGS.Tracker.Tracker import Tracker
+
 import cv2
 import numpy as np
+
 class RTSGSSystem:
-    def __init__(self, dataset:DataLoader, tracker,config, stream=False):
+    def __init__(self, dataset:DataLoader, tracker:Tracker,config, stream=False):
         self.dataset = dataset
         self.tracker = tracker
         self.stream = stream
@@ -25,8 +28,10 @@ class RTSGSSystem:
         self.window = WindowManager(self.pcd,1280, 720, "RTSGS System")
 
         #we combine each Frame point cloud tensor each n frames to save performance
-        self.update_point_cloud_each = 50
+        self.update_point_cloud_each = 1
+        self.last_updated_key_frame = 0
         self.final_update = False
+        
 
     def run(self):
         if not self.stream:
@@ -38,17 +43,20 @@ class RTSGSSystem:
             self.window.start_frame()
 
             frame = self.process_stream_frame()
-            if frame is not None:
-                img, depth = frame[0], frame[1]
-                self.pcd.add_frame(img, depth, self.tracker.poses[-1])
             #main thread
-
+            start = self.dataset.current_keyframe_index - self.update_point_cloud_each
+            end = self.dataset.current_keyframe_index
             #we update the pcd each n frames 
-            if(self.dataset.current_frame_index %self.update_point_cloud_each == 0 and self.dataset.current_frame_index< len(self.dataset.RGBD_pairs) and frame is not None ):
-                self.pcd.update_full_pointcloud()
-            if(self.dataset.current_frame_index== len(self.dataset.RGBD_pairs) and self.final_update == False):
+            if(self.dataset.current_keyframe_index % self.update_point_cloud_each == 0 and frame is not None and self.last_updated_key_frame != self.dataset.current_keyframe_index ):
+                print("update")
+                self.last_updated_key_frame = self.dataset.current_keyframe_index
+                self.pcd.update_full_pointcloud(self.dataset.rgb_keyframes[start:end],self.dataset.depth_keyframes,self.tracker.keyframes_poses[start:end])
+            
+            #special case
+            if(self.dataset.current_keyframe_index== len(self.dataset.rgb_keyframes) and self.final_update == False):
                 self.final_update = True
-                self.pcd.update_full_pointcloud()
+                self.last_updated_key_frame = self.dataset.current_keyframe_index
+                self.pcd.update_full_pointcloud(self.dataset.rgb_keyframes[start:end],self.dataset.depth_keyframes,self.tracker.keyframes_poses[start:end])
 
             self.tracker.visualize_tracking()
             self.window.render_frame()

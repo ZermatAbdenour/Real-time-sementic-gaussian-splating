@@ -15,6 +15,7 @@ class DataLoader:
         else:
             self.isDepth = True
         self.current_frame_index = 0
+        self.current_keyframe_index = 0
         self._served_last_frame = False
         self.stream = stream
         self._stream_start_time = -1

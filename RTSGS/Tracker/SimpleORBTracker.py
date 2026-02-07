@@ -1,3 +1,4 @@
+from RTSGS.DataLoader.DataLoader import DataLoader
 from RTSGS.Tracker.Tracker import Tracker
 import numpy as np
 import cv2
@@ -7,7 +8,7 @@ from imgui_bundle import imgui, implot
 
 class SimpleORBTracker(Tracker):
 
-    def __init__(self,config, Orb_features=1000, depth_scale=5000.0, dataset=None):
+    def __init__(self,dataset:DataLoader,config, Orb_features=1000, depth_scale=5000.0):
         super().__init__()
         self.dataset = dataset
 
@@ -173,8 +174,9 @@ class SimpleORBTracker(Tracker):
             # store depth temporarily (will be cleared after updating pointcloud)
             if depth is not None:
                 self.dataset.depth_keyframes.append(depth)
-
+            self.keyframes_poses.append(pose.astype(np.float32))
             self.last_kf_pose = pose
+            self.dataset.current_keyframe_index+=1
 
         # visualization
         if(self.show_matching_window):

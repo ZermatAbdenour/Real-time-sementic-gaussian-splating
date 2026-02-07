@@ -5,7 +5,7 @@ from RTSGS.DataLoader.DataLoader import DataLoader
 
 
 class PointCloud:
-    def __init__(self,dataset:DataLoader, config):
+    def __init__(self, config):
         self.config = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -112,6 +112,94 @@ class PointCloud:
 
         if torch.cuda.is_available() and (self.frame_count % 10 == 0):
             torch.cuda.empty_cache()
+    @torch.no_grad()
+    def add_keyframes_batch_gpu(self, rgb_list, depth_list, pose_list):
+        """
+        True GPU batch processing of keyframes.
+        """
+
+        device = self.device
+        K = len(rgb_list)
+        assert K > 0
+
+        # --------------------------------------------------
+        # Stack inputs
+        # --------------------------------------------------
+        rgb = torch.from_numpy(np.stack(rgb_list)).to(device).float() / 255.0
+        depth = torch.from_numpy(np.stack(depth_list)).to(device).float() / self.depth_scale
+        poses = torch.from_numpy(np.stack(pose_list)).to(device).float()
+
+        # shapes:
+        # rgb   : [K, H, W, 3]
+        # depth : [K, H, W]
+        # poses : [K, 4, 4]
+
+        Kf, H, W = depth.shape
+
+        # --------------------------------------------------
+        # Pixel grid (shared)
+        # --------------------------------------------------
+        u = self.u[None].expand(Kf, -1, -1).reshape(-1).float()
+        v = self.v[None].expand(Kf, -1, -1).reshape(-1).float()
+
+        z = depth.reshape(-1)
+
+        mask = z > 0
+        if self.pixel_subsample < 1.0:
+            mask &= (torch.rand_like(z) < self.pixel_subsample)
+
+        if mask.sum() == 0:
+            return
+
+        u = u[mask]
+        v = v[mask]
+        z = z[mask]
+
+        # --------------------------------------------------
+        # Backprojection (camera space)
+        # --------------------------------------------------
+        x = (u - self.cx) * z / self.fx
+        y = (v - self.cy) * z / self.fy
+        points_cam = torch.stack((x, y, z), dim=1)  # [N,3]
+
+        # --------------------------------------------------
+        # Pose expansion
+        # --------------------------------------------------
+        frame_ids = (
+            torch.arange(Kf, device=device)
+            .view(Kf, 1, 1)
+            .expand(Kf, H, W)
+            .reshape(-1)[mask]
+        )
+
+        R = poses[frame_ids, :3, :3]   # [N,3,3]
+        t = poses[frame_ids, :3, 3]    # [N,3]
+
+        points_world = torch.bmm(R, points_cam.unsqueeze(-1)).squeeze(-1) + t
+
+        # --------------------------------------------------
+        # Colors
+        # --------------------------------------------------
+        colors = rgb.reshape(-1, 3)[mask]
+
+        # --------------------------------------------------
+        # Novelty + voxel filters (ONCE)
+        # --------------------------------------------------
+        points_world, colors = self.novelty_filter_fast(
+            points_world, colors, voxel=self.novelty_voxel
+        )
+        if points_world is None:
+            return
+
+        points_world, colors = self.voxel_filter(
+            points_world, colors, voxel=self.voxel_size
+        )
+
+        # --------------------------------------------------
+        # Store
+        # --------------------------------------------------
+        self.points.append(points_world.detach().cpu())
+        self.colors.append(colors.detach().cpu())
 
     # -------- packing --------
     def _pack_voxels(self, vox_xyz_cpu: torch.Tensor) -> torch.Tensor:
@@ -213,9 +301,28 @@ class PointCloud:
         filtered_colors = filtered_colors / counts
         return filtered_points, filtered_colors
 
-    def update_full_pointcloud(self):
+    # def update_full_pointcloud(self):
+    #     if not self.points:
+    #         return None, None
+    #     self.all_points = torch.cat(self.points, dim=0)
+    #     self.all_colors = torch.cat(self.colors, dim=0)
+    #     return self.all_points, self.all_colors
+    
+    def update_full_pointcloud(self, rgb_keyframes,depth_keyframes,poses):
+        if not depth_keyframes:
+            return None, None
+
+        self.add_keyframes_batch_gpu(
+            rgb_keyframes,
+            depth_keyframes,
+            poses,
+        )
+
+        depth_keyframes.clear()
+
         if not self.points:
             return None, None
+
         self.all_points = torch.cat(self.points, dim=0)
         self.all_colors = torch.cat(self.colors, dim=0)
         return self.all_points, self.all_colors
