@@ -221,3 +221,4 @@ Prototype/
 requirements.txt
 data/
 ThirdParty/
+.vscode/

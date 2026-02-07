@@ -14,7 +14,7 @@ if __name__ == "__main__":
     data = TUMDataLoader(os.path.join(data_path, "rgb"), os.path.join(data_path, "depth"),os.path.join(data_path, "groundtruth.txt"), stream=True)
     config = Config()
     print("Loading Data...")
-    data.load_data(500)
+    data.load_data(1500)
     print("Data Loaded.")
 
     # Initialize Tracker

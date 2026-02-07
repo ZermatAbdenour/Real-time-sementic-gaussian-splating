@@ -101,6 +101,9 @@ class Renderer:
         glBufferSubData(GL_ARRAY_BUFFER, 0, required_bytes, interleaved)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
 
+        #update added points counts
+        self.pcd_added_size = self.pcd.all_points.shape[0]
+
     def Render(self):
         self.fb.bind()
 

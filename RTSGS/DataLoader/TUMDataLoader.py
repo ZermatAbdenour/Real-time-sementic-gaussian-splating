@@ -9,10 +9,6 @@ class TUMDataLoader(DataLoader):
         super().__init__(rgb_path, depth_path, stream)
         self._gt_path = gt_path
 
-        # Outputs
-        self.RGBD_pairs = []
-        self.time_stamps = None
-
         # Ground truth (aligned to loaded frames)
         self.gt_timestamps = None                  # (N,)
         self.gt_poses = None                       # (N, 4, 4) or None if gt not available
@@ -75,6 +71,7 @@ class TUMDataLoader(DataLoader):
     def load_data(self, limit=-1):
         max_dt = 0.02
 
+        # List and sort files
         rgb_files = sorted(os.listdir(self._rgb_path))
         depth_files = sorted(os.listdir(self._depth_path))
 
@@ -84,7 +81,7 @@ class TUMDataLoader(DataLoader):
         # Load GT once
         gt_ts, gt_vec = self._load_tum_gt_file(self._gt_path)
 
-        pairs = []
+        pairs = []                     # (rgb_path, depth_path)
         used_rgb_ts = []
         used_gt_ts = []
         used_gt_vec = []
@@ -100,7 +97,10 @@ class TUMDataLoader(DataLoader):
             if limit != -1 and len(pairs) >= limit:
                 break
 
-            print(f"Loading frame {i+1}/{min(limit if limit != -1 else len(rgb_files), len(rgb_files))}", end="\r")
+            print(
+                f"Loading frame {i+1}/{min(limit if limit != -1 else len(rgb_files), len(rgb_files))}",
+                end="\r"
+            )
 
             # --- match depth to rgb (nearest) ---
             while (
@@ -113,15 +113,15 @@ class TUMDataLoader(DataLoader):
                 skipped_rgb_depth += 1
                 continue
 
-            rgb_img = cv2.imread(os.path.join(self._rgb_path, rgb_files[i]), cv2.IMREAD_COLOR)
-            depth_img = cv2.imread(os.path.join(self._depth_path, depth_files[j_depth]), cv2.IMREAD_UNCHANGED).astype(np.float32)
+            rgb_file_path = os.path.join(self._rgb_path, rgb_files[i])
+            depth_file_path = os.path.join(self._depth_path, depth_files[j_depth])
 
-            pairs.append((rgb_img, depth_img))
+            # Store file paths only, not images
+            pairs.append((rgb_file_path, depth_file_path))
             used_rgb_ts.append(t_rgb)
 
             # --- match GT to rgb (nearest) ---
             if gt_ts is not None:
-                # advance pointer to nearest
                 while (
                     j_gt + 1 < len(gt_ts)
                     and abs(gt_ts[j_gt + 1] - t_rgb) < abs(gt_ts[j_gt] - t_rgb)
@@ -131,17 +131,18 @@ class TUMDataLoader(DataLoader):
                 if abs(gt_ts[j_gt] - t_rgb) < max_dt:
                     used_gt_ts.append(gt_ts[j_gt])
                     used_gt_vec.append(gt_vec[j_gt])
+
                     tx, ty, tz, qx, qy, qz, qw = gt_vec[j_gt]
                     used_gt_T.append(self._vec_to_T44(tx, ty, tz, qx, qy, qz, qw))
                 else:
-                    # keep alignment by storing None, or skip. Here we keep None-like placeholders.
                     skipped_gt += 1
                     used_gt_ts.append(np.nan)
                     used_gt_vec.append([np.nan] * 7)
                     used_gt_T.append(np.full((4, 4), np.nan, dtype=np.float32))
 
+        # Save loaded pairs
         self.RGBD_pairs = pairs
-        self.time_stamps = np.asarray(used_rgb_ts, dtype=np.float64) * 1.0 # Limit to 30 FPS
+        self.time_stamps = np.asarray(used_rgb_ts, dtype=np.float64)
 
         if gt_ts is not None:
             self.gt_timestamps = np.asarray(used_gt_ts, dtype=np.float64)

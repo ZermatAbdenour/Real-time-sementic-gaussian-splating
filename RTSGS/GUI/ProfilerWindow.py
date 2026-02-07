@@ -307,7 +307,17 @@ class ProfilerWindow:
 
         imgui.text_disabled("Call tree (caller -> callee), ordered by cumulative time:")
         imgui.begin_child("call_tree", (0, 300), True)
-        for root in self._roots:
+
+        roots_to_render = self._roots
+
+        # --- SEARCH FIX: if needle, make matching functions temporary roots ---
+        if needle:
+            matching_keys = [k for k in self._nodes if needle in _fmt_funckey(k).lower()]
+            # Sort by metric so the most expensive ones appear on top
+            matching_keys.sort(key=lambda k: self._nodes[k].cumtime_ms if self.sort_by == "cumulative" else self._nodes[k].tottime_ms, reverse=True)
+            roots_to_render = matching_keys
+
+        for root in roots_to_render:
             self._render_node(root, 0, needle, visited=set())
         imgui.end_child()
 

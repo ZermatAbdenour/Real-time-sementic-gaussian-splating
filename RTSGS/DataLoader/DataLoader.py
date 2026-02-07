@@ -19,6 +19,13 @@ class DataLoader:
         self.stream = stream
         self._stream_start_time = -1
 
+        #key frame
+
+        #the rgb key framess savess the frames that has translation > alpha and rotation > theta from the last key frames this save training time and performance
+        self.rgb_keyframes=[]
+        #every time we process and add a batch of frames to the point cloud we clear the depth data to save the performance 
+        self.depth_keyframes=[]
+
     def get_next_frame(self):
         if self._stream_start_time == -1:
             print("Starting Stream...")
@@ -52,19 +59,25 @@ class DataLoader:
         return iter(self.RGBD_pairs)
     def __len__(self):
         return len(self.RGBD_pairs)
-    def load_data(self,limit = -1):
+    
+    def load_data(self, limit=-1):
         assert not self.stream, "The default load_data method does not support streaming mode"
-        #This method loads the data by name order from the provided paths
-        rgb_sorted = os.listdir(self._rgb_path)
-        depth_sorted = os.listdir(self._depth_path)
-        for i in range(min(limit,len(rgb_sorted))):
-            print(f"Loading frame {i+1}/{min(limit,len(rgb_sorted))}",end = '\r')
-            rgb_file = os.path.join(self._rgb_path,rgb_sorted[i])
-            rgb_image = cv2.imread(rgb_file,cv2.IMREAD_COLOR)
-            if(self.isDepth and i < len(depth_sorted)):
-                depth_file = os.path.join(self._depth_path,depth_sorted[i])
-                depth_image = cv2.imread(depth_file,cv2.IMREAD_UNCHANGED)
+
+        # Load file names in order
+        rgb_sorted = sorted(os.listdir(self._rgb_path))
+        depth_sorted = sorted(os.listdir(self._depth_path)) if self.isDepth else []
+
+        max_frames = len(rgb_sorted) if limit == -1 else min(limit, len(rgb_sorted))
+
+        for i in range(max_frames):
+            print(f"Loading frame {i+1}/{max_frames}", end='\r')
+
+            rgb_file = os.path.join(self._rgb_path, rgb_sorted[i])
+
+            if self.isDepth and i < len(depth_sorted):
+                depth_file = os.path.join(self._depth_path, depth_sorted[i])
             else:
-                depth_image = None
-        
-            self.RGBD_pairs.append((rgb_image,depth_image))
+                depth_file = None
+
+            # Store paths only
+            self.RGBD_pairs.append((rgb_file, depth_file))

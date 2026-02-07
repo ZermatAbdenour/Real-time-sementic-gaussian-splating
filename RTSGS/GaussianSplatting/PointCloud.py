@@ -1,9 +1,11 @@
 import numpy as np
 import torch
 
+from RTSGS.DataLoader.DataLoader import DataLoader
+
 
 class PointCloud:
-    def __init__(self, config):
+    def __init__(self,dataset:DataLoader, config):
         self.config = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 

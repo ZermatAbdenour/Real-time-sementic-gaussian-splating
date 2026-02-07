@@ -25,6 +25,14 @@ class SimpleORBTracker(Tracker):
             [0, 0, -1, 0],
             [0, 0, 0, 1]
         ])]
+        #keyframes
+        # keyframe thresholds
+        self.alpha = config.get("kf_translation", 0.05)
+        self.theta = config.get("kf_rotation", 5.0 * np.pi / 180.0) 
+
+        self.last_kf_pose = None
+
+
         self.prev_rgb = None
 
         self.viz_img = None
@@ -147,11 +155,34 @@ class SimpleORBTracker(Tracker):
         pose = self.poses[-1] @ np.linalg.inv(T)     
         self.poses.append(pose.astype(np.float32))
 
-        draw_n = min(80, len(good))
-        self.viz_img = cv2.drawMatches(
-            prev_img, kp1, cur_img, kp2, good[:draw_n], None,
-            flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
-        )
+
+        # add key frames
+        is_keyframe = False
+
+        if self.last_kf_pose is None:
+            is_keyframe = True
+        else:
+            dt, dR = self._pose_distance(self.last_kf_pose, pose)
+            if dt > self.alpha or dR > self.theta:
+                is_keyframe = True
+
+        if is_keyframe and self.dataset is not None:
+            # store RGB keyframe
+            self.dataset.rgb_keyframes.append(rgb)
+
+            # store depth temporarily (will be cleared after updating pointcloud)
+            if depth is not None:
+                self.dataset.depth_keyframes.append(depth)
+
+            self.last_kf_pose = pose
+
+        # visualization
+        if(self.show_matching_window):
+            draw_n = min(80, len(good))
+            self.viz_img = cv2.drawMatches(
+                prev_img, kp1, cur_img, kp2, good[:draw_n], None,
+                flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS
+            )
 
         self.prev_rgb = cur_img
         return pose
@@ -212,6 +243,23 @@ class SimpleORBTracker(Tracker):
 
         aligned = (scale * (R @ src.T)).T + t
         return aligned.astype(np.float32), (float(scale), R.astype(np.float32), t.astype(np.float32))
+    def _pose_distance(self, T1, T2):
+        """
+        Compute translation (L2) and rotation (angle) distance between two poses.
+        """
+        # translation
+        t1 = T1[:3, 3]
+        t2 = T2[:3, 3]
+        trans_dist = np.linalg.norm(t1 - t2)
+
+        # rotation
+        R1 = T1[:3, :3]
+        R2 = T2[:3, :3]
+        R = R1.T @ R2
+        trace = np.clip((np.trace(R) - 1) / 2, -1.0, 1.0)
+        rot_angle = np.arccos(trace)
+
+        return trans_dist, rot_angle
 
     def visualize_tracking(self):
         if self.viz_img is None:

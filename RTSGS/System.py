@@ -2,9 +2,11 @@
 import threading
 from RTSGS.GUI.WindowManager import WindowManager
 from RTSGS.GaussianSplatting.PointCloud import PointCloud
-
+from RTSGS.DataLoader.DataLoader import DataLoader
+import cv2
+import numpy as np
 class RTSGSSystem:
-    def __init__(self, dataset, tracker,config, stream=False):
+    def __init__(self, dataset:DataLoader, tracker,config, stream=False):
         self.dataset = dataset
         self.tracker = tracker
         self.stream = stream
@@ -39,7 +41,6 @@ class RTSGSSystem:
             if frame is not None:
                 img, depth = frame[0], frame[1]
                 self.pcd.add_frame(img, depth, self.tracker.poses[-1])
-            
             #main thread
 
             #we update the pcd each n frames 
@@ -65,9 +66,15 @@ class RTSGSSystem:
             if self._busy:
                 return None
 
-        frame = self.dataset.get_next_frame()
-        if frame is None:
+        frame_paths = self.dataset.get_next_frame()
+        if frame_paths is None:
             return None
+        print(len(self.dataset.rgb_keyframes))
+        #read color and depth img
+        rgb = cv2.imread(frame_paths[0], cv2.IMREAD_COLOR)
+        depth = cv2.imread(frame_paths[1], cv2.IMREAD_UNCHANGED).astype(np.float32)
+        frame = (rgb,depth)
+        
         img, depth = frame[0], frame[1]
         with self._cv:
             self._pending = (img, depth)
