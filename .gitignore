@@ -220,5 +220,5 @@ __marimo__/
 Prototype/
 requirements.txt
 data/
-ThirdParty/
+/ThirdParty/
 .vscode/
