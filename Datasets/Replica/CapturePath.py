@@ -48,7 +48,7 @@ assert len(trajectory) > 0, "Trajectory is empty"
 print(f"[OK] Loaded {len(trajectory)} trajectory poses")
 
 # =====================================================
-# SIMULATOR CONFIG (same as ./build/viewer)
+# SIMULATOR CONFIG
 # =====================================================
 sim_cfg = habitat_sim.SimulatorConfiguration()
 sim_cfg.scene_dataset_config_file = DATASET_CONFIG
@@ -76,11 +76,9 @@ depth_sensor.sensor_type = habitat_sim.SensorType.DEPTH
 depth_sensor.resolution = [480, 640]
 depth_sensor.position = mn.Vector3(0.0, 0.0, 0.0)
 depth_sensor.hfov = 90.0
-
 depth_sensor.min_depth = 0.1
 depth_sensor.max_depth = 10.0
 depth_sensor.normalize_depth = False
-
 sensor_specs.append(depth_sensor)
 
 # =====================================================
@@ -112,13 +110,15 @@ for i, frame in enumerate(trajectory):
     rgb = obs["rgb"]                          # uint8
     depth = obs["depth"].astype(np.float32)  # meters
 
+    ts = f"{frame['time']:.6f}"               # TUM-style timestamp
+
     imageio.imwrite(
-        os.path.join(RGB_DIR, f"{i:06d}.png"),
+        os.path.join(RGB_DIR, f"{ts}.png"),
         rgb
     )
 
     imageio.imwrite(
-        os.path.join(DEPTH_DIR, f"{i:06d}.png"),
+        os.path.join(DEPTH_DIR, f"{ts}.png"),
         (depth * 1000.0).astype(np.uint16)    # mm (TUM style)
     )
 
@@ -129,4 +129,4 @@ for i, frame in enumerate(trajectory):
 # CLEANUP
 # =====================================================
 sim.close()
-print("DONE — RGB + Depth captured correctly")
+print("DONE — RGB + Depth captured with timestamps")

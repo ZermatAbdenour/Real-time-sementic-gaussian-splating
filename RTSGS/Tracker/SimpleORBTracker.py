@@ -8,7 +8,7 @@ from imgui_bundle import imgui, implot
 
 class SimpleORBTracker(Tracker):
 
-    def __init__(self,dataset:DataLoader,config, Orb_features=1000, depth_scale=5000.0):
+    def __init__(self,dataset:DataLoader,config, Orb_features=3000):
         super().__init__()
         self.dataset = dataset
 
@@ -16,7 +16,7 @@ class SimpleORBTracker(Tracker):
         self.cx, self.cy = config.get('cx'), config.get('cy')
         self.K = config.get_camera_intrinsics()
 
-        self.depth_scale = depth_scale
+        self.depth_scale = config.get('depth_scale')
         self.orb = cv2.ORB_create(nfeatures=Orb_features)
         self.bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
 
