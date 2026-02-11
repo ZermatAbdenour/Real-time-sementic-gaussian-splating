@@ -5,10 +5,14 @@ from imgui_bundle.python_backends.glfw_backend import GlfwRenderer
 from RTSGS.GUI.ViewportWindow import ViewportWindow
 from RTSGS.GUI.PerformanceWindow import PerformanceWindow
 from RTSGS.GUI.ProfilerWindow import ProfilerWindow
+from RTSGS.GUI.GaussianSplattingWindow import GaussianSplattingWindow
+from RTSGS.GaussianSplatting.PointCloud import PointCloud
+from RTSGS.GaussianSplatting.GaussianSplating import GaussianSplatting
 from RTSGS.GaussianSplatting.Renderer.OpenGLRenderer import Renderer
+from RTSGS.GaussianSplatting.Renderer.Camera import Camera
 from RTSGS.GUI import context
 class WindowManager:
-    def __init__(self,point_cloud, width=1280, height=720, title="Modular Docking"):
+    def __init__(self,point_cloud:PointCloud,gs:GaussianSplatting, width=1280, height=720, title="Modular Docking"):
         self.width = width
         self.height = height
         self.title = title
@@ -57,9 +61,10 @@ class WindowManager:
         # windows
         self.performance_window = PerformanceWindow()
         self.profiler_window = ProfilerWindow()
-        self.opengl_renderer = Renderer(point_cloud)
+        camera = Camera()
+        self.opengl_renderer = Renderer(point_cloud,camera)
         self.viewport_window = ViewportWindow(self.opengl_renderer)
-
+        self.gaussian_splating_window = GaussianSplattingWindow(point_cloud,camera)
         #time
         self._last_time = None
         self._delta_time = 0.016
@@ -129,6 +134,9 @@ class WindowManager:
 
         if self.viewport_window.is_open:
             self.viewport_window.draw(self._delta_time)
+        
+        if self.gaussian_splating_window.is_open:
+            self.gaussian_splating_window.draw()
 
     def render_frame(self):
         self.update_delta_time()

@@ -8,7 +8,7 @@ from .Camera import Camera
 from imgui_bundle import imgui
 
 class Renderer:
-    def __init__(self, pcd):
+    def __init__(self, pcd,camera:Camera):
         # Initialize the resources
         res.init_resources()
 
@@ -21,7 +21,7 @@ class Renderer:
         self._initialized = False
         
         #camera setup
-        self.camera = Camera()
+        self.camera = camera
 
         #Opengl 
         # Enable depth testing for 3D points

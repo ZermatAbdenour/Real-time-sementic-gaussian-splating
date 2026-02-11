@@ -1,5 +1,6 @@
 
 import threading
+from RTSGS.GaussianSplatting.GaussianSplating import GaussianSplatting
 from RTSGS.GUI.WindowManager import WindowManager
 from RTSGS.GaussianSplatting.PointCloud import PointCloud
 from RTSGS.DataLoader.DataLoader import DataLoader
@@ -24,8 +25,8 @@ class RTSGSSystem:
 
         # Define the point cloud
         self.pcd = PointCloud(config)
-
-        self.window = WindowManager(self.pcd,1280, 720, "RTSGS System")
+        self.gs = GaussianSplatting(self.pcd)
+        self.window = WindowManager(self.pcd,self.gs,1280, 720, "RTSGS System")
 
         #we combine each Frame point cloud tensor each n frames to save performance
         self.update_point_cloud_each = 1
