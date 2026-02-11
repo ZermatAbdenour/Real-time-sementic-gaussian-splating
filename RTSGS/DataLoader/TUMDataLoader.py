@@ -126,19 +126,3 @@ class TUMDataLoader(DataLoader):
         if gt_ts is not None:
             print(f"GT loaded from: {self._gt_path}")
             print(f"GT unmatched for {skipped_gt} frames (stored NaNs).")
-        print("RGB timestamps:", rgb_ts[:10])
-        print("GT timestamps:", gt_ts[:10] if gt_ts is not None else None)
-        print("Differences:", rgb_ts[:10] - gt_ts[:10] if gt_ts is not None else None)
-
-        print("\n================= Loaded Data Summary =================")
-        for idx, ((rgb_file, depth_file), t_rgb, t_gt, gt_pose) in enumerate(zip(
-            self.RGBD_pairs, self.time_stamps, 
-            self.gt_timestamps if self.gt_timestamps is not None else [None]*len(self.RGBD_pairs),
-            self.gt_poses if self.gt_poses is not None else [None]*len(self.RGBD_pairs),
-        )):
-            gt_str = f"GT time: {t_gt:.6f}" if isinstance(t_gt, float) and not np.isnan(t_gt) else "GT: None"
-            print(f"[{idx:4d}] RGB: {os.path.basename(rgb_file)}, "
-                  f"Depth: {os.path.basename(depth_file)}, "
-                  f"RGB TS: {t_rgb:.6f} {gt_str}")
-
-        print(f"\nTotal loaded pairs: {len(self.RGBD_pairs)}")

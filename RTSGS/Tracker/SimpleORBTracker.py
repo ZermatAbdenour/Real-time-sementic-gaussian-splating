@@ -8,7 +8,7 @@ from imgui_bundle import imgui, implot
 
 class SimpleORBTracker(Tracker):
 
-    def __init__(self,dataset:DataLoader,config, Orb_features=3000):
+    def __init__(self,dataset:DataLoader,config, Orb_features=1000):
         super().__init__()
         self.dataset = dataset
 
