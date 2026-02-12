@@ -1,3 +1,4 @@
+from RTSGS.Config import Config
 from RTSGS.DataLoader.DataLoader import DataLoader
 from RTSGS.Tracker.Tracker import Tracker
 import numpy as np
@@ -8,10 +9,8 @@ from imgui_bundle import imgui, implot
 
 class SimpleORBTracker(Tracker):
 
-    def __init__(self,dataset:DataLoader,config, Orb_features=1000):
-        super().__init__()
-        self.dataset = dataset
-
+    def __init__(self,dataset:DataLoader,config:Config, Orb_features=1000):
+        super().__init__(dataset,config)
         self.fx, self.fy = config.get('fx'), config.get('fy')
         self.cx, self.cy = config.get('cx'), config.get('cy')
         self.K = config.get_camera_intrinsics()
@@ -149,7 +148,10 @@ class SimpleORBTracker(Tracker):
         T[:3, 3] = tvec.reshape(3).astype(np.float32)
 
         pose = self.poses[-1] @ np.linalg.inv(T)   
-        pose = self.dataset.gt_poses[len(self.poses)+2]
+        if(len(self.poses)+2 <len(self.dataset.gt_poses)):
+            pose = self.dataset.gt_poses[len(self.poses)+2]
+        else:
+            return
         self.poses.append(pose)  
         #self.poses.append(pose.astype(np.float32))
 

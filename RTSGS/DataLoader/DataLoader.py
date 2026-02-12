@@ -24,7 +24,7 @@ class DataLoader:
 
         #the rgb key framess savess the frames that has translation > alpha and rotation > theta from the last key frames this save training time and performance
         self.rgb_keyframes=[]
-        #every time we process and add a batch of frames to the point cloud we clear the depth data to save the performance 
+        #every time we process and add a batch of frames to the point cloud we clear the depth data to save the performance TODO not when i added gauian plating
         self.depth_keyframes=[]
 
     def get_next_frame(self):

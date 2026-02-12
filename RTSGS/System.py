@@ -25,7 +25,7 @@ class RTSGSSystem:
 
         # Define the point cloud
         self.pcd = PointCloud(config)
-        self.gs = GaussianSplatting(self.pcd)
+        self.gs = GaussianSplatting(self.pcd,self.dataset,self.tracker)
         self.window = WindowManager(self.pcd,self.gs,1280, 720, "RTSGS System")
 
         #we combine each Frame point cloud tensor each n frames to save performance
@@ -44,6 +44,7 @@ class RTSGSSystem:
             self.window.start_frame()
 
             frame = self.process_stream_frame()
+            self.gs.training_step()
             #main thread
             start = self.dataset.current_keyframe_index - self.update_point_cloud_each
             end = self.dataset.current_keyframe_index
@@ -51,14 +52,13 @@ class RTSGSSystem:
             if(self.dataset.current_keyframe_index % self.update_point_cloud_each == 0 and frame is not None and self.last_updated_key_frame != self.dataset.current_keyframe_index ):
                 print("update")
                 self.last_updated_key_frame = self.dataset.current_keyframe_index
-                self.pcd.update_full_pointcloud(self.dataset.rgb_keyframes[start:end],self.dataset.depth_keyframes,self.tracker.keyframes_poses[start:end])
+                self.pcd.update_full_pointcloud(self.dataset.rgb_keyframes[start:end],self.dataset.depth_keyframes[start:end],self.tracker.keyframes_poses[start:end])
             
             #special case
             if(self.dataset.current_keyframe_index== len(self.dataset.rgb_keyframes) and self.final_update == False):
                 self.final_update = True
                 self.last_updated_key_frame = self.dataset.current_keyframe_index
-                self.pcd.update_full_pointcloud(self.dataset.rgb_keyframes[start:end],self.dataset.depth_keyframes,self.tracker.keyframes_poses[start:end])
-
+                self.pcd.update_full_pointcloud(self.dataset.rgb_keyframes[start:end],self.dataset.depth_keyframes[start:end],self.tracker.keyframes_poses[start:end])
             self.tracker.visualize_tracking()
             self.window.render_frame()
 
