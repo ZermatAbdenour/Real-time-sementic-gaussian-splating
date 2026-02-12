@@ -60,26 +60,33 @@ class PointCloud:
         device = self.device
         N = points_cam.shape[0]
 
-        # Geometry-based scales
+        # 1. Scale Calculation (Matches voxel density)
         sigma_z = self.sigma_z0 + self.sigma_z1 * (z * z)
         sigma_x = (self.sigma_px / self.fx) * z
         sigma_y = (self.sigma_px / self.fy) * z
         scales = torch.stack([sigma_x, sigma_y, sigma_z], dim=-1)
+        
+        # LOG SPACE: Clamp to prevent -inf or tiny dots
+        # Ensuring scales are at least 1/4 of voxel size to prevent gaps
+        scales = torch.log(torch.clamp(scales, min=0.01)) 
 
-        # Quaternion handling (Rotation of the camera world pose)
+        # 2. Quaternions
         r_np = R_world_from_cam.cpu().numpy()
-        if r_np.ndim == 2: # Single pose for all points
-            q_single = Rot.from_matrix(r_np).as_quat() # [x, y, z, w]
+        if r_np.ndim == 2:
+            q_single = Rot.from_matrix(r_np).as_quat()
             quats = torch.from_numpy(q_single).to(device).float().expand(N, 4)
-        else: # Batch of poses per point
+        else:
             quats = torch.from_numpy(Rot.from_matrix(r_np).as_quat()).to(device).float()
 
-        # Initial Alpha/Opacity
+        # 3. Alpha (Opacity)
         if self.alpha_depth_scale > 0.0:
             a = self.alpha_init * torch.exp(-z / self.alpha_depth_scale)
         else:
             a = torch.full((N,), float(self.alpha_init), device=device)
+        
+        # LOGIT SPACE: Clamp to [0.1, 0.99] to keep gradients healthy
         a = torch.clamp(a, self.alpha_min, self.alpha_max).unsqueeze(1)
+        a = torch.logit(a)
 
         return scales, quats, a
 

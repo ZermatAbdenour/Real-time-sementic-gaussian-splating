@@ -24,7 +24,7 @@ if __name__ == "__main__":
     # config.set('height', 480)
     # config.set("depth_scale",1000)
     print("Loading Data...")
-    data.load_data(100)
+    data.load_data(500)
     print("Data Loaded.")
 
     # Initialize Tracker
