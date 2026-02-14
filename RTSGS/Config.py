@@ -14,7 +14,7 @@ class Config:
             self.config_dict.setdefault('width', 640)
             self.config_dict.setdefault('height', 480)
             self.config_dict.setdefault('depth_scale', 5000.0)
-            self.config_dict.setdefault('voxel_size', 0.05)
+            self.config_dict.setdefault('voxel_size', 0.02)
             self.config_dict.setdefault('kf_translation',0.05)
             self.config_dict.setdefault('kf_rotation',5.0 * np.pi / 180.0)
 

@@ -19,8 +19,8 @@ class PointCloud:
         self.novelty_voxel = float(config.get("novelty_voxel", self.voxel_size))
 
         # Noise and Alpha params
-        self.sigma_px = float(config.get("sigma_px", 1.0))
-        self.sigma_z0 = float(config.get("sigma_z0", 0.002))
+        self.sigma_px = float(config.get("sigma_px", 4.0))
+        self.sigma_z0 = float(config.get("sigma_z0", 0.005))
         self.sigma_z1 = float(config.get("sigma_z1", 0.0))
         self.alpha_init = float(config.get("alpha_init", 1.0))
         self.alpha_min = float(config.get("alpha_min", 0.01))

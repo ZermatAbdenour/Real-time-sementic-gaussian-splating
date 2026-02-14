@@ -2,7 +2,6 @@ import torch
 import torch.nn.functional as F
 from gsplat import rendering
 import numpy as np
-import matplotlib.pyplot as plt
 from pytorch_msssim import ssim
 from RTSGS.DataLoader.DataLoader import DataLoader
 from RTSGS.GaussianSplatting.PointCloud import PointCloud
@@ -13,20 +12,18 @@ class GaussianSplatting:
         self.pcd = pcd
         self.dataset = dataset
         self.device = pcd.device
-        self.learning_rate = learning_rate
+        self.base_lr = learning_rate
         self.tracker = tracker
         self.width, self.height = tracker.config.get('width'), tracker.config.get('height')
         
         self.num_points_optimized = 0
         self.optimizer = None
-        self.debug_done = False
+        self.iteration_count = 0
+        
+        # Hyperparameters
+        self.densify_scale_threshold = 0.01
 
     def _setup_optimizer(self):
-        """ 
-        Note: Resetting the optimizer wipes momentum. 
-        In SLAM, points are added constantly, so this 'wiping' is 
-        what makes the foreground look frozen.
-        """
         if self.pcd.all_points is None: return
 
         # Ensure parameters are leaf nodes
@@ -35,13 +32,13 @@ class GaussianSplatting:
             if not isinstance(val, torch.nn.Parameter):
                 setattr(self.pcd, attr, torch.nn.Parameter(val.detach().requires_grad_(True)))
 
+        # Stabilized LR: Points (positions) move slower to prevent jitter
         params = [
-            {'params': [self.pcd.all_points], 'lr': self.learning_rate * 0.1, "name": "points"},
-            {'params': [self.pcd.all_colors], 'lr': self.learning_rate * 2, "name": "rgb"},
-            # Increase this! Scales usually need 5x-10x the base LR
-            {'params': [self.pcd.all_scales], 'lr': self.learning_rate * 5.0, "name": "scales"},
-            {'params': [self.pcd.all_quaternions], 'lr': self.learning_rate * 0.5, "name": "quats"},
-            {'params': [self.pcd.all_alpha], 'lr': self.learning_rate, "name": "alphas"},
+            {'params': [self.pcd.all_points], 'lr': self.base_lr * 0.2, "name": "points"},
+            {'params': [self.pcd.all_colors], 'lr': self.base_lr * 2.0, "name": "rgb"},
+            {'params': [self.pcd.all_scales], 'lr': self.base_lr * 5.0, "name": "scales"},
+            {'params': [self.pcd.all_quaternions], 'lr': self.base_lr * 0.5, "name": "quats"},
+            {'params': [self.pcd.all_alpha], 'lr': self.base_lr, "name": "alphas"},
         ]
         self.optimizer = torch.optim.Adam(params)
         self.num_points_optimized = self.pcd.all_points.shape[0]
@@ -50,39 +47,31 @@ class GaussianSplatting:
         if self.pcd.all_points is None or not self.tracker.keyframes_poses:
             return 0.0
 
-        # Re-init optimizer only if point count changes significantly
+        self.iteration_count += 1
+        
+        # Re-init optimizer only if point count changed
         if self.optimizer is None or self.pcd.all_points.shape[0] != self.num_points_optimized:
             self._setup_optimizer()
 
+        # Exponential LR Decay for point positions
+        if self.iteration_count % 1000 == 0:
+            for g in self.optimizer.param_groups:
+                if g['name'] == 'points':
+                    g['lr'] *= 0.8 # Gradually slow down points to freeze them
+
         self.optimizer.zero_grad()
 
-        # 1. Scale Guard (Keeps Gaussians sharp)
-
-        # 2. Keyframe Subsampling
-        all_idx = list(range(len(self.tracker.keyframes_poses)))
-        sample_idx = np.random.choice(all_idx, min(2, len(all_idx)), replace=False)
-
+        # 1. Camera setup
+        sample_idx = np.random.choice(len(self.tracker.keyframes_poses), min(2, len(self.tracker.keyframes_poses)), replace=False)
         gt_rgbs = torch.stack([torch.from_numpy(self.dataset.rgb_keyframes[i]).to(self.device).float() / 255.0 for i in sample_idx])
-        gt_depths = torch.stack([torch.from_numpy(self.dataset.depth_keyframes[i]).to(self.device).float() / self.pcd.depth_scale for i in sample_idx])
+        viewmats = torch.stack([torch.inverse(torch.from_numpy(self.tracker.keyframes_poses[i]).to(self.device).float()) for i in sample_idx])
         
-        # --- CAMERA POSE FIX ---
-        # tracker.keyframes_poses are C2W (Camera-to-World).
-        # gsplat.rasterization requires W2C (World-to-Camera).
-        viewmats = []
-        for i in sample_idx:
-            c2w = torch.from_numpy(self.tracker.keyframes_poses[i]).to(self.device).float()
-            # Simple inverse works because your points are likely already in OpenCV space.
-            # Do NOT apply 'flip' here, or you will get a black screen again.
-            w2c = torch.inverse(c2w)
-            viewmats.append(w2c)
-        viewmats = torch.stack(viewmats)
-
-        # 3. Render
         K = torch.eye(3, device=self.device)
         K[0,0], K[1,1], K[0,2], K[1,2] = self.pcd.fx, self.pcd.fy, self.pcd.cx, self.pcd.cy
         Ks = K.unsqueeze(0).expand(len(sample_idx), -1, -1)
 
-        rendered_rgb, rendered_depth, _ = rendering.rasterization(
+        # 2. Render
+        rendered_rgb, _, info = rendering.rasterization(
             means=self.pcd.all_points,
             quats=F.normalize(self.pcd.all_quaternions, p=2, dim=-1),
             scales=torch.exp(self.pcd.all_scales), 
@@ -94,24 +83,26 @@ class GaussianSplatting:
             height=self.height,
         )
 
-        # 4. Losses
+        if "means2d" in info:
+            info["means2d"].retain_grad()
+
         l1_loss = F.l1_loss(rendered_rgb, gt_rgbs)
-        ssim_val = ssim(rendered_rgb.permute(0, 3, 1, 2), gt_rgbs.permute(0, 3, 1, 2), data_range=1.0)
-        rgb_total = 0.8 * l1_loss + 0.2 * (1.0 - ssim_val)
+        ssim_val = ssim(rendered_rgb, gt_rgbs, data_range=1.0)
+        rgb_loss = 0.8 * l1_loss + 0.2 * (1.0 - ssim_val)
 
-        # 5. Depth Loss (Prioritizing Foreground movement)
-        rendered_depth = rendered_depth.squeeze(-1)
-        mask = gt_depths > 0
-        depth_error = torch.abs(rendered_depth[mask] - gt_depths[mask])
-        
-        # Weighted loss: Closer points (smaller depth) get higher gradients
-        weights = 1.0 / (gt_depths[mask] + 0.1) 
-        depth_loss = (depth_error * weights).mean()
+        # B. Isotropy Loss (Anti-glitch/Anti-needle)
+        # Forces the 3 scale dimensions to be similar
+        scales = self.pcd.all_scales
+        mean_scale = scales.mean(dim=-1, keepdim=True)
+        isotropy_loss = torch.mean((scales - mean_scale)**2)
 
-        total_loss = rgb_total + 0.8 * depth_loss
+        # Total Loss
+        total_loss = rgb_loss + 0.1 * isotropy_loss
 
         if total_loss > 0:
             total_loss.backward()
             self.optimizer.step()
+                
+        return total_loss.item()
                 
         return total_loss.item()
