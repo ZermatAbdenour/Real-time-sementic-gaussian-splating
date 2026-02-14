@@ -72,7 +72,7 @@ class GaussianSplattingWindow:
             return False
 
         self._xyz = xyz.detach()
-        self._rgb = rgb.detach().clamp(0.0, 1.0)
+        self._rgb = rgb.detach()  
 
         # Pull the optimized parameters
         self._quats = getattr(self.pcd, "all_quaternions", None)
@@ -83,7 +83,7 @@ class GaussianSplattingWindow:
 
     @torch.no_grad()
     def _render_with_gsplat(self) -> np.ndarray:
-        # 1. Camera logic - Keep as is
+        # 1. Camera logic: Convert GUI camera to gsplat-compatible viewmats
         self.camera.update_view()
         R_np, t_np = _extract_camera_rt_from_view(self.camera.view)
         R_row = _to_torch_f32(R_np, self.device)
@@ -91,47 +91,53 @@ class GaussianSplattingWindow:
         viewmat = _row_rt_to_viewmat_col_major(R_row, t_row)
         viewmats = viewmat.unsqueeze(0)
 
+        # Build Intrinsics Matrix
         K = torch.tensor([
             [self.fx, 0.0, self.cx],
             [0.0, self.fy, self.cy],
             [0.0, 0.0, 1.0],
         ], device=self.device, dtype=torch.float32).unsqueeze(0)
 
+        # Safety check for empty pointclouds
         if self._xyz is None or self._xyz.numel() == 0:
             return np.zeros((self.H, self.W, 3), dtype=np.uint8)
 
         N = self._xyz.shape[0]
 
-        # 2. FIX: Quaternions - Normalize to ensure valid rotation
+        # 2. Quaternions: Must be unit length to represent valid rotations
         if self._quats is not None:
             quats = torch.nn.functional.normalize(self._quats.detach(), p=2, dim=-1)
         else:
             quats = torch.zeros((N, 4), device=self.device)
             quats[:, 3] = 1.0
 
-        # 3. FIX: Scales - Apply Exponential activation
-        # This is critical because the optimizer works in log-space.
-        # Without exp(), negative log-scales make Gaussians explode or disappear.
+        # 3. Scales: Optimized in log-space, so we apply Exp to get physical size
         if self._scales is not None:
             scales = torch.exp(self._scales.detach())
         else:
             scales = torch.full((N, 3), self.default_scale, device=self.device)
 
-        # 4. FIX: Opacity - Apply Sigmoid activation
-        # This converts optimized logits back into a 0.0 - 1.0 range.
+        # 4. Opacity: Optimized as logits, apply Sigmoid to squash to [0, 1]
         if self._alpha is not None:
             opacities = torch.sigmoid(self._alpha.detach()).squeeze(-1)
         else:
             opacities = torch.ones((N,), device=self.device)
 
-        # 5. Render - Use activated values
-        # We also ensure colors are detached to prevent any graph buildup
+        # 5. Color: Apply Sigmoid to map logit parameters back to RGB [0, 1]
+        # This is the fix that prevents the visualization from looking flat/dark
+        if self._rgb is not None:
+            colors = torch.sigmoid(self._rgb.detach())
+        else:
+            colors = torch.ones((N, 3), device=self.device)
+
+        # 6. Rasterization Call
+        # Note: render_mode="RGB" ensures we get back a 3-channel image
         image, _, _ = rendering.rasterization(
             means=self._xyz.detach(),
             quats=quats,
             scales=scales,
             opacities=opacities,
-            colors=self._rgb.detach().contiguous(),
+            colors=colors.contiguous(),
             viewmats=viewmats,
             Ks=K,
             width=self.W,
@@ -139,13 +145,15 @@ class GaussianSplattingWindow:
             render_mode="RGB",
         )
 
-        # 6. Post-process to CPU NumPy
-        # gsplat returns [Batch, H, W, 3]. We squeeze to get [H, W, 3].
+        # 7. Post-process to CPU NumPy for ImGui display
+        # Squeeze batch dimension: [1, H, W, 3] -> [H, W, 3]
         image0 = image.squeeze(0) if image.ndim == 4 else image
+        
+        # Clamp just in case of float precision errors, then map to 0-255
         rgb_u8 = (image0.clamp(0.0, 1.0) * 255.0).to(torch.uint8).cpu().numpy()
         
         return rgb_u8
-
+    
     def draw(self):
         if not self.is_open: return
         self.is_open = imgui.begin("Gaussian Splatting Window", self.is_open)[1]

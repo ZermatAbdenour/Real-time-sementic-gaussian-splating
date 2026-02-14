@@ -37,7 +37,7 @@ class GaussianSplatting:
 
         params = [
             {'params': [self.pcd.all_points], 'lr': self.learning_rate * 0.1, "name": "points"},
-            {'params': [self.pcd.all_colors], 'lr': self.learning_rate, "name": "rgb"},
+            {'params': [self.pcd.all_colors], 'lr': self.learning_rate * 2, "name": "rgb"},
             # Increase this! Scales usually need 5x-10x the base LR
             {'params': [self.pcd.all_scales], 'lr': self.learning_rate * 5.0, "name": "scales"},
             {'params': [self.pcd.all_quaternions], 'lr': self.learning_rate * 0.5, "name": "quats"},
@@ -87,23 +87,12 @@ class GaussianSplatting:
             quats=F.normalize(self.pcd.all_quaternions, p=2, dim=-1),
             scales=torch.exp(self.pcd.all_scales), 
             opacities=torch.sigmoid(self.pcd.all_alpha).squeeze(-1),
-            colors=self.pcd.all_colors,
+            colors=torch.sigmoid(self.pcd.all_colors),
             viewmats=viewmats,
             Ks=Ks,
             width=self.width,
             height=self.height,
         )
-
-        # --- DEBUG WINDOW (Runs once after 30k points) ---
-        if not self.debug_done and self.num_points_optimized > 30000:
-            self.debug_done = True
-            print(f"\n[DEBUG] Verifying Camera Pose for {self.num_points_optimized} points...")
-            plt.figure(figsize=(12, 5))
-            plt.subplot(1, 2, 1); plt.title("Current Render (Model)")
-            plt.imshow(torch.clamp(rendered_rgb[0], 0, 1).detach().cpu().numpy())
-            plt.subplot(1, 2, 2); plt.title("Ground Truth (Target)")
-            plt.imshow(gt_rgbs[0].cpu().numpy())
-            plt.show()
 
         # 4. Losses
         l1_loss = F.l1_loss(rendered_rgb, gt_rgbs)

@@ -189,6 +189,9 @@ class PointCloud:
             z_f[kept_indices]
         )
 
+
+        filtered_cols = torch.clamp(filtered_cols, min=0.001, max=0.999)
+        filtered_cols = torch.logit(filtered_cols)
         # 6. Final Voxel Downsampling
         return self.voxel_filter_with_gaussians(filtered_pts, filtered_cols, scales, quats, alpha, self.voxel_size)
 
