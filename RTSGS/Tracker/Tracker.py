@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 
-from RTSGS.Config import Config
+from RTSGS.Config.Config import Config
 from RTSGS.DataLoader.DataLoader import DataLoader
 
 class Tracker(ABC):

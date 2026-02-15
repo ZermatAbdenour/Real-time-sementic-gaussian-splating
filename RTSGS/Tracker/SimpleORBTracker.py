@@ -1,4 +1,4 @@
-from RTSGS.Config import Config
+from RTSGS.Config.Config import Config
 from RTSGS.DataLoader.DataLoader import DataLoader
 from RTSGS.Tracker.Tracker import Tracker
 import numpy as np
