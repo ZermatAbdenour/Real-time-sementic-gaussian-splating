@@ -1,6 +1,5 @@
 import os
 import numpy as np
-import magnum as mn
 import habitat_sim
 import imageio.v2 as imageio
 import open3d as o3d
@@ -10,128 +9,182 @@ from scipy.ndimage import gaussian_filter1d
 from habitat_sim.agent import AgentConfiguration
 from habitat_sim.utils.common import quat_from_coeffs
 
-# =============================================================================
-# 1. COORDINATE CONVERSION (The "Secret Sauce")
-# =============================================================================
+# ----------------------------
+# Reconstruction constants
+# ----------------------------
+def build_R_fix():
+    ax, ay = np.radians(-90.0), np.radians(180.0)
+    Rx = np.array(
+        [[1, 0, 0],
+         [0, np.cos(ax), -np.sin(ax)],
+         [0, np.sin(ax),  np.cos(ax)]],
+        dtype=np.float64
+    )
+    Ry = np.array(
+        [[ np.cos(ay), 0, np.sin(ay)],
+         [0,           1, 0],
+         [-np.sin(ay), 0, np.cos(ay)]],
+        dtype=np.float64
+    )
+    return (Ry @ Rx)
 
-def convert_habitat_to_opencv_quat(q_hab_xyzw):
+R_fix = build_R_fix()
+R_fix_inv = R_fix.T
+
+# OpenCV cam -> Habitat cam axis flip
+S_cv_to_hcam = np.diag([1.0, -1.0, -1.0])
+
+def write_tum_line(f, ts, t, Rm):
+    q = R.from_matrix(Rm).as_quat()  # [x,y,z,w]
+    f.write(f"{ts:.6f} {t[0]} {t[1]} {t[2]} {q[0]} {q[1]} {q[2]} {q[3]}\n")
+
+def lookat_quat_habitat(position, target, world_up):
+    forward = target - position
+    forward = forward / (np.linalg.norm(forward) + 1e-9)
+
+    right = np.cross(forward, world_up)
+    right = right / (np.linalg.norm(right) + 1e-9)
+
+    up = np.cross(right, forward)
+    up = up / (np.linalg.norm(up) + 1e-9)
+
+    R_mat = np.column_stack([right, up, -forward])  # Habitat basis
+    return R.from_matrix(R_mat).as_quat()
+
+def habitat_quat_to_R_world_from_hcam(q_hab_xyzw):
+    return R.from_quat(q_hab_xyzw).as_matrix()
+
+def desired_Rt_world_from_cv(pos_world, q_hab_xyzw):
+    R_wh = habitat_quat_to_R_world_from_hcam(q_hab_xyzw)
+    R_des = R_wh @ S_cv_to_hcam
+    t_des = pos_world
+    return R_des, t_des
+
+def raw_Rt_for_reconstruction(R_des, t_des):
+    R_raw = R_fix_inv @ R_des
+    t_raw = R_fix_inv @ t_des
+    return R_raw, t_raw
+
+# ----------------------------
+# Up-axis detection by "floor band" density
+# ----------------------------
+def detect_up_axis_by_floor_band(points, band_frac=0.02):
     """
-    Converts Habitat/OpenGL (-Z forward, Y up) to OpenCV (+Z forward, Y down).
-    This ensures your saved poses match your Gaussian Splatting / PointCloud logic.
+    Choose the axis that most looks like "vertical":
+    Floors create a dense band near the minimum of the vertical axis.
+    We score each axis by how many points lie within a small band above its low percentile.
     """
-    R_hab = R.from_quat(q_hab_xyzw).as_matrix()
-    # Rotation to flip Y and Z axes
-    R_chab_cocv = np.diag([1.0, -1.0, -1.0])
-    R_ocv = R_hab @ R_chab_cocv
-    return R.from_matrix(R_ocv).as_quat()
+    scores = []
+    for axis in range(3):
+        vals = points[:, axis]
+        lo = np.percentile(vals, 2.0)
+        hi = np.percentile(vals, 98.0)
+        span = max(hi - lo, 1e-6)
+        band = lo + band_frac * span
+        score = float(np.mean(vals <= band))  # fraction of points in the bottom band
+        scores.append(score)
 
-# =============================================================================
-# 2. TRAJECTORY GENERATOR (Now with Robust Loading)
-# =============================================================================
+    up_axis = int(np.argmax(scores))
+    return up_axis, scores
 
-class VelocityControlledTrajectoryGenerator:
+class TrajectoryGeneratorRobustUp:
     def __init__(self, scene_path, margin=0.3):
         self.margin = margin
-        self.load_scene_robustly(scene_path)
+        self._load(scene_path)
 
-    def load_scene_robustly(self, scene_path):
+    def _load(self, scene_path):
         if not os.path.exists(scene_path):
-            raise FileNotFoundError(f"Could not find mesh at {scene_path}")
+            raise FileNotFoundError(scene_path)
 
-        print(f"[INFO] Attempting to load geometry from {scene_path}...")
-        
-        # We try Point Cloud first because it's more permissive than Triangle Mesh
         pcd = o3d.io.read_point_cloud(scene_path)
-        points = np.asarray(pcd.points)
-
-        if points.shape[0] == 0:
-            print("[WARNING] Point cloud empty, trying Mesh loader (permitting non-triangles)...")
+        pts = np.asarray(pcd.points)
+        if pts.shape[0] == 0:
             mesh = o3d.io.read_triangle_mesh(scene_path)
-            points = np.asarray(mesh.vertices)
+            pts = np.asarray(mesh.vertices)
+        if pts.shape[0] == 0:
+            raise ValueError("Empty mesh/pcd")
 
-        if points.shape[0] == 0:
-            raise ValueError("Failed to extract any vertices from the PLY file. Check file path/integrity.")
+        self.pts = pts
+        self.mins = pts.min(axis=0)
+        self.maxs = pts.max(axis=0)
+        self.center = (self.mins + self.maxs) / 2.0
 
-        print(f"[OK] Successfully loaded {points.shape[0]} vertices.")
-        
-        mins = np.min(points, axis=0)
-        maxs = np.max(points, axis=0)
-        
-        self.scene_bounds = {
-            "min": mins + self.margin,
-            "max": maxs - self.margin,
-            "center": (mins + maxs) / 2.0
-        }
-        y_vals = points[:, 1]
-        self.floor_height = np.percentile(y_vals, 5)
-        self.ceiling_height = np.percentile(y_vals, 95)
-        self.eye_height_min = self.floor_height + 1.3
-        self.eye_height_max = self.ceiling_height - 0.2
+        self.up_axis, scores = detect_up_axis_by_floor_band(pts)
+        self.ground_axes = [a for a in [0, 1, 2] if a != self.up_axis]
 
-    def generate_trajectory(self, num_frames, camera_height, max_speed):
-        # Create a smooth velocity profile (S-curve)
-        t_prof = np.linspace(0, 1, num_frames)
-        velocity_profile = (0.5 - 0.5 * np.cos(t_prof * 2 * np.pi)) * max_speed
-        
-        center = self.scene_bounds["center"]
-        rad_x, rad_z = 0.7, 0.4 # Keeping it tight for figure-8
-        
-        # Figure 8 Math
+        print("[INFO] floor-band scores (x,y,z):", scores)
+        print("[INFO] detected up axis:", ["x", "y", "z"][self.up_axis])
+        print("[INFO] ground axes:", [ ["x","y","z"][a] for a in self.ground_axes ])
+
+        # Estimate floor on that axis
+        vals = pts[:, self.up_axis]
+        self.floor = float(np.percentile(vals, 2.0))
+
+    def generate(self, num_frames, eye_height=1.5, rad_a=0.7, rad_b=0.4):
+        """
+        Keep up-axis constant at floor + eye_height.
+        Generate figure-8 on the other two axes (ground plane).
+        """
         t_key = np.linspace(0, 2 * np.pi, 24)
-        x = rad_x * np.sin(t_key) + center[0]
-        z = rad_z * np.sin(2 * t_key) * 0.6 + center[2]
-        y = np.full_like(t_key, camera_height)
-        keypoints = np.column_stack([x, y, z])
 
-        # Interpolate positions
-        spline = CubicSpline(np.linspace(0, 1, len(keypoints)), keypoints, bc_type='periodic')
-        positions = spline(np.linspace(0, 1, num_frames))
-        
-        # Smooth the resulting path
-        for i in range(3):
-            positions[:, i] = gaussian_filter1d(positions[:, i], sigma=1.2)
+        a = rad_a * np.sin(t_key)
+        b = (rad_b * np.sin(2 * t_key) * 0.6)
 
-        # Generate Orientations (Habitat convention for capture)
-        orientations = []
-        world_up = np.array([0, 1, 0])
+        keypoints = np.zeros((len(t_key), 3), dtype=np.float64)
+        keypoints[:] = self.center
+
+        ax0, ax1 = self.ground_axes
+        keypoints[:, ax0] = self.center[ax0] + a
+        keypoints[:, ax1] = self.center[ax1] + b
+
+        # Clamp "height" so it cannot bob up/down
+        keypoints[:, self.up_axis] = self.floor + eye_height
+
+        spline = CubicSpline(np.linspace(0, 1, len(keypoints)), keypoints, bc_type="periodic")
+        pos = spline(np.linspace(0, 1, num_frames))
+        for k in range(3):
+            pos[:, k] = gaussian_filter1d(pos[:, k], sigma=1.2)
+
+        # Force the up-axis to be EXACT constant (kills any spline overshoot)
+        pos[:, self.up_axis] = self.floor + eye_height
+
+        world_up = np.zeros(3, dtype=np.float64)
+        world_up[self.up_axis] = 1.0
+
+        q = []
         for i in range(num_frames):
             look_idx = min(i + 12, num_frames - 1)
-            forward = positions[look_idx] - positions[i]
-            forward /= (np.linalg.norm(forward) + 1e-6)
-            
-            right = np.cross(forward, world_up)
-            right /= (np.linalg.norm(right) + 1e-6)
-            up = np.cross(right, forward)
-            
-            # Habitat basis: X=right, Y=up, Z=-forward
-            R_mat = np.column_stack([right, up, -forward])
-            orientations.append(R.from_matrix(R_mat).as_quat())
+            q.append(lookat_quat_habitat(pos[i], pos[look_idx], world_up))
 
-        return positions, np.array(orientations)
+        print("[DEBUG] pos ranges:",
+              "x", float(pos[:, 0].min()), float(pos[:, 0].max()),
+              "y", float(pos[:, 1].min()), float(pos[:, 1].max()),
+              "z", float(pos[:, 2].min()), float(pos[:, 2].max()))
 
-# =============================================================================
-# 3. SETTINGS & EXECUTION
-# =============================================================================
+        return pos, np.array(q)
 
+# ----------------------------
+# SETTINGS
+# ----------------------------
 SCENE_PATH = "./ThirdParty/Replica-Dataset/data/data/room_0/mesh.ply"
 DATASET_CONFIG = "ThirdParty/Replica-Dataset/data/data/replica.scene_dataset_config.json"
 SCENE_NAME = "room_0"
 
 OUTPUT_DIR = "habitat_capture"
-RGB_DIR, DEPTH_DIR = os.path.join(OUTPUT_DIR, "rgb"), os.path.join(OUTPUT_DIR, "depth")
-TRAJECTORY_FILE = os.path.join(OUTPUT_DIR, "poses_opencv.txt")
+RGB_DIR = os.path.join(OUTPUT_DIR, "rgb")
+DEPTH_DIR = os.path.join(OUTPUT_DIR, "depth")
+POSES_TUM = os.path.join(OUTPUT_DIR, "poses.txt")
 
-for d in [RGB_DIR, DEPTH_DIR]: os.makedirs(d, exist_ok=True)
+os.makedirs(RGB_DIR, exist_ok=True)
+os.makedirs(DEPTH_DIR, exist_ok=True)
 
-# Path parameters
 NUM_FRAMES, FPS = 150, 30
-CAMERA_HEIGHT, MAX_SPEED = 1.5, 0.3
+EYE_HEIGHT = 1.5  # meters above detected floor (on detected up-axis)
 
-# --- Step A: Generate Trajectory ---
-generator = VelocityControlledTrajectoryGenerator(SCENE_PATH)
-pos, ori_hab = generator.generate_trajectory(NUM_FRAMES, CAMERA_HEIGHT, MAX_SPEED)
+gen = TrajectoryGeneratorRobustUp(SCENE_PATH)
+pos_world, q_hab = gen.generate(NUM_FRAMES, eye_height=EYE_HEIGHT)
 
-# --- Step B: Setup Simulator ---
+# Simulator
 sim_cfg = habitat_sim.SimulatorConfiguration()
 sim_cfg.scene_dataset_config_file = DATASET_CONFIG
 sim_cfg.scene_id = SCENE_NAME
@@ -146,36 +199,37 @@ for uid, s_type in [("rgb", habitat_sim.SensorType.COLOR), ("depth", habitat_sim
 
 agent_cfg = AgentConfiguration()
 agent_cfg.sensor_specifications = sensor_specs
+
 sim = habitat_sim.Simulator(habitat_sim.Configuration(sim_cfg, [agent_cfg]))
 agent = sim.get_agent(0)
 
-# --- Step C: Capture Loop & Export ---
 print(f"[START] Capturing {NUM_FRAMES} frames...")
-with open(TRAJECTORY_FILE, "w") as f:
-    f.write("# timestamp tx ty tz qx qy qz qw (OpenCV T_wc)\n")
-    
+
+with open(POSES_TUM, "w", encoding="utf-8", newline="\n") as f:
+    f.write("# timestamp tx ty tz qx qy qz qw\n")
+
     for i in range(NUM_FRAMES):
-        # 1. Update Habitat Camera
         state = habitat_sim.AgentState()
-        state.position = pos[i]
-        state.rotation = quat_from_coeffs(ori_hab[i])
+        state.position = pos_world[i].astype(np.float32)
+        state.rotation = quat_from_coeffs(q_hab[i].astype(np.float32))
         agent.set_state(state)
 
-        # 2. Extract Data
         obs = sim.get_sensor_observations()
-        rgb = obs["rgb"][:, :, :3]  # No alpha
-        depth = (obs["depth"] * 1000).astype(np.uint16) # Millimeters
-        
-        # 3. Save Files
-        ts_str = f"{i/FPS:.6f}"
+        rgb = obs["rgb"][:, :, :3]
+        depth = (obs["depth"] * 1000).astype(np.uint16)
+
+        ts = i / FPS
+        ts_str = f"{ts:.6f}"
         imageio.imwrite(os.path.join(RGB_DIR, f"{ts_str}.png"), rgb)
         imageio.imwrite(os.path.join(DEPTH_DIR, f"{ts_str}.png"), depth)
 
-        # 4. Export Pose in OpenCV convention
-        q_ocv = convert_habitat_to_opencv_quat(ori_hab[i])
-        f.write(f"{ts_str} {pos[i][0]} {pos[i][1]} {pos[i][2]} {q_ocv[0]} {q_ocv[1]} {q_ocv[2]} {q_ocv[3]}\n")
+        R_des, t_des = desired_Rt_world_from_cv(pos_world[i], q_hab[i])
+        R_raw, t_raw = raw_Rt_for_reconstruction(R_des, t_des)
+        write_tum_line(f, ts, t_raw, R_raw)
 
-        if i % 25 == 0: print(f"Processing frame {i}...")
+        if i % 25 == 0:
+            print(f"Processing frame {i}...")
 
 sim.close()
-print(f"\n[DONE] Saved {NUM_FRAMES} frames and poses to: {OUTPUT_DIR}")
+print(f"\n[DONE] Saved frames to: {OUTPUT_DIR}")
+print(f"[DONE] Saved poses to: {POSES_TUM}")
