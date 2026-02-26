@@ -434,13 +434,13 @@ def main():
     SCENE_ROT_X_DEG = 90.0  # try -90.0 or 0.0
 
     # More motion in horizontal plane
-    PATH_SCALE = 0.85
+    PATH_SCALE =1.5
 
     # Height control: use center band, not floor eye band
-    HEIGHT_MODE = "center"
+    HEIGHT_MODE = "eye"
     CENTER_HEIGHT_FRACTION = 0.60
     CENTER_HEIGHT_BAND = (0.40, 0.85)  # keep camera higher; adjust if too close to ceiling
-    FIXED_HEIGHT_OFFSET_M = 0.3        # push up by +0.3m along up-axis
+    FIXED_HEIGHT_OFFSET_M = -1        # push up by +0.3m along up-axis
 
     # Outputs
     TUM_OUT = os.path.join(OUTPUT_DIR, "trajectory_twc_opencv.txt")

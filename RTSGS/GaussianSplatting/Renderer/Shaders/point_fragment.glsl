@@ -5,7 +5,9 @@ out vec4 FragColor;
 float hash(vec2 p) {
     return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
 }
-
+vec3 sigmoid(vec3 color) {
+    return 1.0 / (1.0 + exp(-color));
+}
 void main(){
     //make points roundeds
     vec2 p = gl_PointCoord * 2.0 - 1.0;
@@ -13,12 +15,13 @@ void main(){
     if (r2 > 1.0) discard;
 
     // Use gl_PrimitiveID to get unique color per point
-    float id = float(gl_PrimitiveID);
+    // float id = float(gl_PrimitiveID);
     
-    vec3 color = vec3(
-         hash(vec2(id, 0.0)),
-         hash(vec2(id, 1.0)),
-         hash(vec2(id, 2.0))
-    );
-    FragColor = vec4(Color.z,Color.y,Color.x, 1.0);
+    // vec3 color = vec3(
+    //      hash(vec2(id, 0.0)),
+    //      hash(vec2(id, 1.0)),
+    //      hash(vec2(id, 2.0))
+    // );
+    vec3 sigmoidColors = sigmoid(Color);
+    FragColor = vec4(sigmoidColors.z,sigmoidColors.y,sigmoidColors.x, 1.0);
 }
