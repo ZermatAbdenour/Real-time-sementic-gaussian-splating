@@ -6,9 +6,10 @@ from .FrameBuffer import FrameBuffer
 import RTSGS.GaussianSplatting.Renderer.Resources as res
 from .Camera import Camera
 from imgui_bundle import imgui
+import ctypes
 
 class Renderer:
-    def __init__(self, pcd,camera:Camera):
+    def __init__(self, pcd, camera: Camera):
         # Initialize the resources
         res.init_resources()
 
@@ -20,10 +21,10 @@ class Renderer:
         self.vao = None
         self._initialized = False
         
-        #camera setup
+        # camera setup
         self.camera = camera
 
-        #Opengl 
+        # Opengl 
         # Enable depth testing for 3D points
         self.fb.bind()
         glEnable(GL_DEPTH_TEST)
@@ -37,10 +38,9 @@ class Renderer:
         print("GL_VENDOR  :", glGetString(GL_VENDOR).decode())
         print("GL_RENDERER:", glGetString(GL_RENDERER).decode())
         print("GL_VERSION :", glGetString(GL_VERSION).decode())
-        
 
     def _initialize_pcd_rendering(self):
-
+        # UPDATED: Check for all_sh instead of all_colors
         if self._initialized or self.pcd.all_points is None or self.pcd.all_points.numel() == 0:
             return
 
@@ -48,9 +48,9 @@ class Renderer:
         self.vbo = glGenBuffers(1)
         glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
 
-        # allocate exactly current size
+        # Allocate space for (Position: 3 floats + SH0: 3 floats) * num_points
         self.vbo_capacity_bytes = (
-            self.pcd.all_points.numel() * self.pcd.all_points.element_size()
+            self.pcd.all_points.shape[0] * 6 * 4
         )
         glBufferData(GL_ARRAY_BUFFER, self.vbo_capacity_bytes, None, GL_DYNAMIC_DRAW)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
@@ -63,32 +63,27 @@ class Renderer:
 
         # position (location = 0)
         glEnableVertexAttribArray(0)
-        glVertexAttribPointer(
-            0, 3, GL_FLOAT, GL_FALSE,
-            stride,
-            ctypes.c_void_p(0)
-        )
+        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(0))
 
-        # color (location = 1)
+        # color/sh0 (location = 1)
         glEnableVertexAttribArray(1)
-        glVertexAttribPointer(
-            1, 3, GL_FLOAT, GL_FALSE,
-            stride,
-            ctypes.c_void_p(12)
-        )
+        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, ctypes.c_void_p(12))
 
         glBindVertexArray(0)
         self._initialized = True
-        self.update_vbo(self.pcd.all_points,self.pcd.all_colors)
+        # UPDATED: Pass all_sh
+        self.update_vbo(self.pcd.all_points, self.pcd.all_sh)
 
-    def update_vbo(self, positions,colors):
+    def update_vbo(self, positions, sh_coeffs):
         if positions is None or positions.numel() == 0:
             return
 
+        # UPDATED: Extract raw 0th order SH coefficients [N, 0, 3]
+        # We send raw coefficients; conversion to RGB (sh*0.282 + 0.5) happens in shader
+        sh0_data = sh_coeffs[:, 0, :].detach().cpu().numpy().astype(np.float32)
         positions_data = positions.detach().cpu().numpy().astype(np.float32)
-        colors_data = colors.detach().cpu().numpy().astype(np.float32)
-        #colors_data[:] = np.array([1.0, 0.0, 0.0], dtype=np.float32)
-        interleaved = np.hstack([positions_data, colors_data])
+        
+        interleaved = np.hstack([positions_data, sh0_data])
         required_bytes = interleaved.nbytes
 
         glBindBuffer(GL_ARRAY_BUFFER, self.vbo)
@@ -101,51 +96,42 @@ class Renderer:
         glBufferSubData(GL_ARRAY_BUFFER, 0, required_bytes, interleaved)
         glBindBuffer(GL_ARRAY_BUFFER, 0)
 
-        #update added points counts
+        # update added points counts
         self.pcd_added_size = self.pcd.all_points.shape[0]
 
     def Render(self):
         self.fb.bind()
-
         glViewport(0, 0, self.fb.width, self.fb.height)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         glClearColor(0.08, 0.1, 0.13, 1.0)
         self.render_pcd()
-        
         self.fb.unbind()
 
     def render_pcd(self):
         # Initialize if needed
         self._initialize_pcd_rendering()
-        if not self._initialized :
+        if not self._initialized:
             return
-        # Set point size
-        
 
-        # Updat VBO with current point data
-        if(self.pcd_added_size< self.pcd.all_points.shape[0]):
-            self.update_vbo(self.pcd.all_points,self.pcd.all_colors)
-        # Render point
+        # UPDATED: Check against all_sh presence and count
+        if self.pcd_added_size < self.pcd.all_points.shape[0]:
+            self.update_vbo(self.pcd.all_points, self.pcd.all_sh)
         
         self.camera.update_view()
-        #update uniforms
+        
+        # update uniforms
         glUniformMatrix4fv(
             glGetUniformLocation(res.simple_shader.program, 'u_view'),
-            1,                         
-            GL_FALSE,                   
-            self.camera.view           
+            1, GL_FALSE, self.camera.view           
         )
         glUniformMatrix4fv(
             glGetUniformLocation(res.simple_shader.program, 'u_projection'),
-            1,                         
-            GL_FALSE,                   
-            self.camera.projection           
+            1, GL_FALSE, self.camera.projection           
         )
 
         glBindVertexArray(self.vao)
         glDrawArrays(GL_POINTS, 0, int(self.pcd.all_points.shape[0]))
         glBindVertexArray(0)
-
 
     def cleanup(self):
         """Release resources"""
@@ -155,4 +141,3 @@ class Renderer:
 
     def on_resize(self):
         self.camera.update_projection(self.fb)
-        

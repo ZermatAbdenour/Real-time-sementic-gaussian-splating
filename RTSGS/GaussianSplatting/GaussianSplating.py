@@ -1,6 +1,6 @@
 import torch
 import torch.nn.functional as F
-from gsplat import rendering
+from gsplat import rendering,spherical_harmonics
 import numpy as np
 from pytorch_msssim import ssim
 
@@ -27,16 +27,15 @@ class GaussianSplatting:
     def _setup_optimizer(self):
         if self.pcd.all_points is None: return
 
-        # Ensure all attributes except points are Parameters
-        # Points are kept as regular tensors because you don't want to optimize them
-        attrs = ["all_colors", "all_scales", "all_quaternions", "all_alpha"]
+        # Updated attributes to include all_sh instead of all_colors
+        attrs = ["all_sh", "all_scales", "all_quaternions", "all_alpha"]
         for attr in attrs:
             val = getattr(self.pcd, attr)
             if not isinstance(val, torch.nn.Parameter):
                 setattr(self.pcd, attr, torch.nn.Parameter(val.detach().requires_grad_(True)))
 
         params = [
-            {'params': [self.pcd.all_colors], 'lr': self.base_lr * 1.0, "name": "rgb"},
+            {'params': [self.pcd.all_sh], 'lr': self.base_lr * 3.0, "name": "sh"},
             {'params': [self.pcd.all_scales], 'lr': self.base_lr * 3.0, "name": "scales"},
             {'params': [self.pcd.all_quaternions], 'lr': self.base_lr * 1, "name": "quats"},
             {'params': [self.pcd.all_alpha], 'lr': self.base_lr, "name": "alphas"},
@@ -44,12 +43,10 @@ class GaussianSplatting:
         self.optimizer = torch.optim.Adam(params)
         self.num_points_optimized = self.pcd.all_points.shape[0]
 
-        # Sync tracking buffers with current point count
         self.xys_grad_norm = torch.zeros(self.num_points_optimized, device=self.device)
         self.vis_counts = torch.zeros(self.num_points_optimized, device=self.device)
 
     def densify(self):
-        # Calculate average gradients
         avg_grads = self.xys_grad_norm / (self.vis_counts + 1e-7)
         avg_grads[torch.isnan(avg_grads)] = 0.0
         
@@ -63,24 +60,20 @@ class GaussianSplatting:
               f"Total: {self.pcd.all_points.shape[0] + num_to_add}\033[0m")
 
         with torch.no_grad():
-            # 1. New points are clones of the positions where gradients were high
             new_points = self.pcd.all_points[mask].clone()
-            new_colors = self.pcd.all_colors[mask].clone()
+            # New points inherit the SH coefficients
+            new_sh = self.pcd.all_sh[mask].clone()
             new_quats = self.pcd.all_quaternions[mask].clone()
             
-            # 2. Small scales and 0.5 opacity for new points
             new_scales = torch.full_like(self.pcd.all_scales[mask], -4.0)
             new_alphas = torch.full_like(self.pcd.all_alpha[mask], 0.0)
 
-            # 3. CONCATENATE: Update the PointCloud object
-            # all_points remains a tensor, others become Parameters in _setup_optimizer
             self.pcd.all_points = torch.cat([self.pcd.all_points.detach(), new_points.detach()], dim=0)
-            self.pcd.all_colors = torch.cat([self.pcd.all_colors.detach(), new_colors.detach()], dim=0)
+            self.pcd.all_sh = torch.cat([self.pcd.all_sh.detach(), new_sh.detach()], dim=0)
             self.pcd.all_scales = torch.cat([self.pcd.all_scales.detach(), new_scales.detach()], dim=0)
             self.pcd.all_quaternions = torch.cat([self.pcd.all_quaternions.detach(), new_quats.detach()], dim=0)
             self.pcd.all_alpha = torch.cat([self.pcd.all_alpha.detach(), new_alphas.detach()], dim=0)
 
-        # 4. Rebuild optimizer (this also resets the xys_grad_norm buffers to the new size)
         self._setup_optimizer()
 
     def training_step(self):
@@ -89,7 +82,6 @@ class GaussianSplatting:
 
         self.iteration_count += 1
         
-        # Ensure optimizer matches current point count (important after densification)
         if self.optimizer is None or self.pcd.all_points.shape[0] != self.num_points_optimized:
             self._setup_optimizer()
 
@@ -103,14 +95,34 @@ class GaussianSplatting:
         T_fix[:3, :3] = self.pcd.R_fix
 
         viewmats = []
+        cam_centers = []
         for i in sample_idx:
             pose = torch.from_numpy(self.tracker.keyframes_poses[i]).to(self.device).float()
-            viewmats.append(torch.inverse(T_fix @ pose))
+            w2c = torch.inverse(T_fix @ pose)
+            viewmats.append(w2c)
+            # Camera center in world space is the translation of c2w
+            cam_centers.append((T_fix @ pose)[:3, 3])
+
         viewmats = torch.stack(viewmats)
+        cam_centers = torch.stack(cam_centers) # [B, 3]
 
         K = torch.eye(3, device=self.device)
         K[0,0], K[1,1], K[0,2], K[1,2] = self.pcd.fx, self.pcd.fy, self.pcd.cx, self.pcd.cy
         Ks = K.unsqueeze(0).expand(len(sample_idx), -1, -1)
+
+        # --- SH VIEW DIRECTION CALCULATION ---
+        # dir = (means - cam_center)
+        means = self.pcd.all_points
+        # dirs shape: [Batch, N, 3]
+        dirs = means.unsqueeze(0) - cam_centers.unsqueeze(1)
+        dirs = F.normalize(dirs, dim=-1)
+
+        # Compute view-dependent colors using SH coefficients
+        # coeffs shape: [Batch, N, K, 3]
+        sh_coeffs = self.pcd.all_sh.unsqueeze(0).expand(len(sample_idx), -1, -1, -1)
+        # Resulting colors are usually in linear space, we use sigmoid for final RGB
+        colors_pre_activation = spherical_harmonics(self.pcd.sh_degree, dirs, sh_coeffs)
+        colors = torch.sigmoid(colors_pre_activation)
 
         # Rasterize
         rendered_rgb, _, info = rendering.rasterization(
@@ -118,7 +130,7 @@ class GaussianSplatting:
             quats=F.normalize(self.pcd.all_quaternions, p=2, dim=-1),
             scales=torch.exp(self.pcd.all_scales), 
             opacities=torch.sigmoid(self.pcd.all_alpha).squeeze(-1),
-            colors=torch.sigmoid(self.pcd.all_colors),
+            colors=colors, # Use SH-computed colors
             viewmats=viewmats,
             Ks=Ks,
             width=self.width,
@@ -135,7 +147,6 @@ class GaussianSplatting:
         if total_loss > 0:
             total_loss.backward()
 
-            # --- Stat Accumulation for Densification ---
             with torch.no_grad():
                 grads_2d = info["means2d"].grad
                 v_norms = torch.norm(grads_2d[:, :2], dim=-1)
@@ -146,7 +157,6 @@ class GaussianSplatting:
 
             self.optimizer.step()
 
-        # Densify Logic
         if self.iteration_count > self.densify_start_iter and self.iteration_count % self.densify_interval == 0:
             self.densify()
                 

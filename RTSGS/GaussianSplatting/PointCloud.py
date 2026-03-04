@@ -8,6 +8,7 @@ class PointCloud:
         self.config = config
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+        # ... [Keep your existing camera parameter inits] ...
         self.fx = torch.tensor(float(config.get("fx")), device=self.device)
         self.fy = torch.tensor(float(config.get("fy")), device=self.device)
         self.cx = torch.tensor(float(config.get("cx")), device=self.device)
@@ -16,6 +17,12 @@ class PointCloud:
         self.depth_scale = float(config.get("depth_scale", 1.0))
         self.voxel_size = float(config.get("voxel_size", 0.02))
         self.novelty_voxel = float(config.get("novelty_voxel", self.voxel_size))
+
+        # --- SH UPDATES ---
+        self.sh_degree = int(config.get("sh_degree", 1))
+        self.num_sh_bases = (self.sh_degree + 1) ** 2
+        self.all_sh = None  # Replaces self.all_colors
+        # ------------------
 
         self.sigma_px = float(config.get("sigma_px", 4.0))
         self.sigma_z0 = float(config.get("sigma_z0", 0.005))
@@ -26,7 +33,6 @@ class PointCloud:
         self.alpha_depth_scale = float(config.get("alpha_depth_scale", 0.0))
 
         self.all_points = None
-        self.all_colors = None
         self.all_scales = None
         self.all_quaternions = None
         self.all_alpha = None
@@ -75,8 +81,8 @@ class PointCloud:
         return points[first_idx[is_new]], colors[first_idx[is_new]], first_idx[is_new]
 
     @torch.no_grad()
-    def voxel_filter_with_gaussians(self, points, colors, scales, quats, alpha, voxel):
-        if points.numel() == 0: return points, colors, scales, quats, alpha
+    def voxel_filter_with_gaussians(self, points, sh, scales, quats, alpha, voxel):
+        if points.numel() == 0: return points, sh, scales, quats, alpha
         vox = torch.floor(points / voxel).to(torch.int64)
         _, inverse = torch.unique(vox, dim=0, return_inverse=True)
         num = int(inverse.max().item()) + 1
@@ -84,11 +90,19 @@ class PointCloud:
         counts.scatter_add_(0, inverse[:, None], torch.ones((points.shape[0], 1), device=self.device))
 
         def reduce_mean(tensor, dim_size):
-            out = torch.zeros((num, dim_size), device=self.device, dtype=tensor.dtype)
-            out.scatter_add_(0, inverse[:, None].expand(-1, dim_size), tensor)
-            return out / counts
+            # Handles both flat [N, D] and SH [N, K, 3] tensors
+            shape = (num,) + tensor.shape[1:]
+            out = torch.zeros(shape, device=self.device, dtype=tensor.dtype)
+            
+            # Reshape indices to match tensor dims for scatter_add
+            idx = inverse.view(-1, *([1] * (len(tensor.shape) - 1))).expand_as(tensor)
+            out.scatter_add_(0, idx, tensor)
+            
+            # Normalizing counts must be reshaped to match out
+            div = counts.view(-1, *([1] * (len(tensor.shape) - 1)))
+            return out / div
 
-        return reduce_mean(points, 3), reduce_mean(colors, 3), reduce_mean(scales, 3), \
+        return reduce_mean(points, 3), reduce_mean(sh, 3), reduce_mean(scales, 3), \
                F.normalize(reduce_mean(quats, 4), p=2, dim=1), reduce_mean(alpha, 1)
 
     @torch.no_grad()
@@ -123,8 +137,19 @@ class PointCloud:
         if res is None: return None
         
         pts, cols, k_idx = res
+        
+        # --- SH CONVERSION ---
+        cols_clamped = torch.clamp(cols, 0.001, 0.999)
+
+        cols_logit = torch.logit(cols_clamped)
+
+        sh_full = torch.zeros((pts.shape[0], self.num_sh_bases, 3), device=self.device)
+
+        sh_full[:, 0, :] = cols_logit / 0.28209479177387814
+        # ---------------------
+
         scales, quats, alpha = self._make_gaussians_batch(points_cam[k_idx], R_corr[k_idx], z_f[k_idx])
-        return self.voxel_filter_with_gaussians(pts, torch.logit(torch.clamp(cols, 0.001, 0.999)), scales, quats, alpha, self.voxel_size)
+        return self.voxel_filter_with_gaussians(pts, sh_full, scales, quats, alpha, self.voxel_size)
 
     def update_full_pointcloud(self, rgb_keyframes, depth_keyframes, poses):
         if not rgb_keyframes: return self.get_map()
@@ -132,14 +157,14 @@ class PointCloud:
         if new_data is None: return self.get_map()
 
         if self.all_points is None:
-            self.all_points, self.all_colors, self.all_scales, self.all_quaternions, self.all_alpha = new_data
+            self.all_points, self.all_sh, self.all_scales, self.all_quaternions, self.all_alpha = new_data
         else:
             self.all_points = torch.cat([self.all_points, new_data[0]])
-            self.all_colors = torch.cat([self.all_colors, new_data[1]])
+            self.all_sh = torch.cat([self.all_sh, new_data[1]])
             self.all_scales = torch.cat([self.all_scales, new_data[2]])
             self.all_quaternions = torch.cat([self.all_quaternions, new_data[3]])
             self.all_alpha = torch.cat([self.all_alpha, new_data[4]])
         return self.get_map()
 
     def get_map(self):
-        return self.all_points, self.all_colors, self.all_scales, self.all_quaternions, self.all_alpha
+        return self.all_points, self.all_sh, self.all_scales, self.all_quaternions, self.all_alpha
