@@ -13,3 +13,12 @@ class ReplicaConfig(Config):
         self.set('width', 640)
         self.set('height', 480)
         self.set('depth_scale', 1000.0)
+        self.set('voxel_size', 0.02)
+
+        self.set("sigma_px", 2.0)
+        self.set("sigma_z0", 0.001)
+        self.set("sigma_z1", 0.0)
+        self.set("alpha_init", 1.0)
+        self.set("alpha_min", 0.01)
+        self.set("alpha_max", 1.0)
+        self.set("alpha_depth_scale", 0.)

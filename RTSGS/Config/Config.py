@@ -17,6 +17,14 @@ class Config:
             self.config_dict.setdefault('voxel_size', 0.05)
             self.config_dict.setdefault('kf_translation',0.02)
             self.config_dict.setdefault('kf_rotation',5.0 * np.pi / 180.0)
+            
+            self.config_dict.setdefault("sigma_px", 4.0)
+            self.config_dict.setdefault("sigma_z0", 0.005)
+            self.config_dict.setdefault("sigma_z1", 0.0)
+            self.config_dict.setdefault("alpha_init", 1.0)
+            self.config_dict.setdefault("alpha_min", 0.01)
+            self.config_dict.setdefault("alpha_max", 1.0)
+            self.config_dict.setdefault("alpha_depth_scale", 0.0)
 
     def get_camera_intrinsics(self):
         intrinsics = np.array([[self.config_dict['fx'], 0, self.config_dict['cx']],

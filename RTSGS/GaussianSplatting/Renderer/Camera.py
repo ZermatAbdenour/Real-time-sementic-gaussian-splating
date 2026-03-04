@@ -1,7 +1,8 @@
 import numpy as np
 from dataclasses import dataclass, field
 from numpy.typing import NDArray
-
+from imgui_bundle import imgui
+import glfw
 Vec3 = NDArray[np.float32]
 Mat4 = NDArray[np.float32]
 
@@ -11,16 +12,21 @@ class Camera():
     euler_angles: Vec3 = field(default_factory=lambda: np.zeros(3, dtype=np.float32))
     projection: Mat4 = field(default_factory=lambda: np.eye(4, dtype=np.float32))
     view: Mat4 = field(default_factory=lambda: np.eye(4, dtype=np.float32))
+    
     fov: float = 60.0
+    aspect_ratio: float = 1.0
+    width: int = 800
+    height: int = 600
     
     move_speed: float = 5.0
     sprint_speed: float = 10.0
     scroll_speed: float = 0.2
-    mouse_sensitivity: float = 0.5
+    mouse_sensitivity: float = 0.1
     
     last_mouse_x: float = 0.0
     last_mouse_y: float = 0.0
     first_mouse: bool = True
+    is_looking: bool = False
         
     @staticmethod
     def perspective(fov_y, aspect, near, far):
@@ -151,3 +157,43 @@ class Camera():
             0.02, 
             50.0
         )
+    def update_resolution(self, width: int, height: int):
+        self.width = max(width, 1)
+        self.height = max(height, 1)
+        self.aspect_ratio = self.width / self.height
+        # Update projection matrix automatically when size changes
+        self.projection = self.perspective(np.radians(self.fov), self.aspect_ratio, 0.02, 50.0)
+
+    def process_window_input(self, window_hovered: bool, window_focused: bool, delta_time: float):
+        io = imgui.get_io()
+        
+        # 1. Right-click to look logic
+        if imgui.is_mouse_clicked(1) and window_hovered:
+            self.is_looking = True
+
+        if not imgui.is_mouse_down(1):
+            if self.is_looking:
+                self.is_looking = False
+                self.first_mouse = True
+
+        if self.is_looking:
+            mx, my = imgui.get_mouse_pos()
+            self.process_mouse(mx, my, delta_time)
+
+        # 2. Scroll logic
+        if window_hovered and io.mouse_wheel != 0:
+            self.process_scroll(io.mouse_wheel)
+
+        # 3. Keyboard logic (using context.window for raw key states)
+        if window_focused or self.is_looking:
+            from RTSGS.GUI import context
+            win = context.window
+            keys = {
+                'W': glfw.get_key(win, glfw.KEY_W) == glfw.PRESS,
+                'A': glfw.get_key(win, glfw.KEY_A) == glfw.PRESS,
+                'S': glfw.get_key(win, glfw.KEY_S) == glfw.PRESS,
+                'D': glfw.get_key(win, glfw.KEY_D) == glfw.PRESS,
+                'Q': glfw.get_key(win, glfw.KEY_Q) == glfw.PRESS,
+                'E': glfw.get_key(win, glfw.KEY_E) == glfw.PRESS,
+                'SHIFT': glfw.get_key(win, glfw.KEY_LEFT_SHIFT) == glfw.PRESS,}
+            self.process_keyboard(keys, delta_time)

@@ -136,7 +136,7 @@ class WindowManager:
             self.viewport_window.draw(self._delta_time)
         
         if self.gaussian_splating_window.is_open:
-            self.gaussian_splating_window.draw()
+            self.gaussian_splating_window.draw(self._delta_time)
 
     def render_frame(self):
         self.update_delta_time()
