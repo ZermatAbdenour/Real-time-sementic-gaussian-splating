@@ -38,7 +38,7 @@ conda activate "$ENV_NAME"
 
 echo "=== Installing Habitat-Sim $HABITAT_VERSION ==="
 # Install Habitat-Sim
-conda install -y habitat-sim="$HABITAT_VERSION=py3.9_linux_acbe6f4922e68145e401e55c30f9dfea460a3f24" \
+conda install -y habitat-sim \
     -c aihabitat -c conda-forge
 
 echo "=== Installing open3d ==="

@@ -1,20 +1,25 @@
 import os
+
+# Silence logs / limit threads (must be set before importing libs that read them)
 os.environ["MAGNUM_LOG"] = "quiet"
 os.environ["HABITAT_SIM_LOG"] = "quiet"
 os.environ["OMP_NUM_THREADS"] = "1"
 
-import numpy as np
-import imageio.v2 as imageio
+from dataclasses import dataclass
+from typing import Dict, Tuple
 
-import habitat_sim
+import imageio.v2 as imageio
 import magnum as mn
+import numpy as np
+import habitat_sim
+
 from habitat_sim.agent import AgentConfiguration
 from habitat_sim.utils.common import quat_from_coeffs
 
 from scipy.interpolate import CubicSpline
-from scipy.spatial.transform import Rotation as R, Slerp
 from scipy.ndimage import gaussian_filter1d
 from scipy.signal import savgol_filter
+from scipy.spatial.transform import Rotation as R, Slerp
 
 
 # =============================================================================
@@ -24,6 +29,9 @@ SENSOR_HEIGHT_M = 1.6
 SCENE_ROT_X_DEG = 90.0
 
 
+# =============================================================================
+# Small helpers (math / transforms)
+# =============================================================================
 def normalize_quat_xyzw(q: np.ndarray) -> np.ndarray:
     q = q.astype(np.float32)
     n = float(np.linalg.norm(q))
@@ -43,43 +51,27 @@ def enforce_quat_continuity_xyzw(quats: np.ndarray) -> np.ndarray:
 
 
 def habitat_wc_quat_to_opencv_wc_quat(q_wc_hab_xyzw: np.ndarray) -> np.ndarray:
-    R_wc_hab = R.from_quat(q_wc_hab_xyzw).as_matrix().astype(np.float32)
-    R_chab__cocv = np.diag([1.0, -1.0, -1.0]).astype(np.float32)
-    R_wc_ocv = R_wc_hab @ R_chab__cocv
-    return R.from_matrix(R_wc_ocv).as_quat().astype(np.float32)
-
-
-def process_rgb(rgb_rgba_or_rgb: np.ndarray, flip_vertical: bool) -> np.ndarray:
-    img = rgb_rgba_or_rgb
-    if img.ndim == 3 and img.shape[2] == 4:
-        img = img[:, :, :3]
-    if flip_vertical:
-        img = np.ascontiguousarray(img[::-1, :, :])
-    return img
-
-
-def estimate_bounds_from_navmesh(sim: habitat_sim.Simulator, num_samples: int = 25000):
-    pts = []
-    for _ in range(int(num_samples)):
-        p = sim.pathfinder.get_random_navigable_point()
-        pts.append([p[0], p[1], p[2]])
-    pts = np.asarray(pts, dtype=np.float32)
-    bmin = np.min(pts, axis=0).astype(np.float32)
-    bmax = np.max(pts, axis=0).astype(np.float32)
-    return bmin, bmax
+    """
+    Convert a world->camera quaternion from Habitat convention into an OpenCV-style camera convention.
+    Input/Output are quaternions in xyzw order.
+    """
+    r_wc_hab = R.from_quat(q_wc_hab_xyzw).as_matrix().astype(np.float32)
+    r_chab__cocv = np.diag([1.0, -1.0, -1.0]).astype(np.float32)
+    r_wc_ocv = r_wc_hab @ r_chab__cocv
+    return R.from_matrix(r_wc_ocv).as_quat().astype(np.float32)
 
 
 def rotation_matrix_x(deg: float) -> np.ndarray:
     return R.from_euler("x", float(deg), degrees=True).as_matrix().astype(np.float32)
 
 
-def rotate_points(points: np.ndarray, R3: np.ndarray) -> np.ndarray:
+def rotate_points(points: np.ndarray, r3: np.ndarray) -> np.ndarray:
     if points.ndim == 1:
-        return (R3 @ points.reshape(3, 1)).reshape(3).astype(np.float32)
-    return (points @ R3.T).astype(np.float32)
+        return (r3 @ points.reshape(3, 1)).reshape(3).astype(np.float32)
+    return (points @ r3.T).astype(np.float32)
 
 
-def rotate_aabb(bounds_min: np.ndarray, bounds_max: np.ndarray, R3: np.ndarray):
+def rotate_aabb(bounds_min: np.ndarray, bounds_max: np.ndarray, r3: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     corners = np.array(
         [
             [bounds_min[0], bounds_min[1], bounds_min[2]],
@@ -93,7 +85,7 @@ def rotate_aabb(bounds_min: np.ndarray, bounds_max: np.ndarray, R3: np.ndarray):
         ],
         dtype=np.float32,
     )
-    rc = rotate_points(corners, R3)
+    rc = rotate_points(corners, r3)
     return np.min(rc, axis=0).astype(np.float32), np.max(rc, axis=0).astype(np.float32)
 
 
@@ -108,11 +100,33 @@ def project_to_plane(v: np.ndarray, n_unit: np.ndarray) -> np.ndarray:
     return (v - np.dot(v, n_unit) * n_unit).astype(np.float32)
 
 
-def make_sim_and_agent(dataset_config, scene_name, width, height, hfov_deg, min_depth, max_depth, sensor_height_m: float):
+def process_rgb(rgb_rgba_or_rgb: np.ndarray, flip_vertical: bool) -> np.ndarray:
+    img = rgb_rgba_or_rgb
+    if img.ndim == 3 and img.shape[2] == 4:
+        img = img[:, :, :3]
+    if flip_vertical:
+        img = np.ascontiguousarray(img[::-1, :, :])
+    return img
+
+
+# =============================================================================
+# Habitat setup
+# =============================================================================
+def make_sim_and_agent(
+    dataset_config: str,
+    scene_name: str,
+    width: int,
+    height: int,
+    hfov_deg: float,
+    min_depth: float,
+    max_depth: float,
+    sensor_height_m: float,
+):
     sim_cfg = habitat_sim.SimulatorConfiguration()
     sim_cfg.scene_dataset_config_file = dataset_config
     sim_cfg.scene_id = scene_name
     sim_cfg.enable_physics = False
+    sim_cfg.scene_light_setup = ""
 
     sensor_specs = []
 
@@ -143,21 +157,37 @@ def make_sim_and_agent(dataset_config, scene_name, width, height, hfov_deg, min_
     return sim, agent
 
 
+def estimate_bounds_from_navmesh(sim: habitat_sim.Simulator, num_samples: int = 25000) -> Tuple[np.ndarray, np.ndarray]:
+    pts = []
+    for _ in range(int(num_samples)):
+        p = sim.pathfinder.get_random_navigable_point()
+        pts.append([p[0], p[1], p[2]])
+    pts = np.asarray(pts, dtype=np.float32)
+    return np.min(pts, axis=0).astype(np.float32), np.max(pts, axis=0).astype(np.float32)
+
+
+# =============================================================================
+# Trajectory generation
+# =============================================================================
 class FullBoundsTourGenerator:
-    def __init__(self, bounds_min, bounds_max, scene_rot_x_deg=0.0):
+    def __init__(self, bounds_min: np.ndarray, bounds_max: np.ndarray, scene_rot_x_deg: float = 0.0):
         self.scene_rot_x_deg = float(scene_rot_x_deg)
-        self.R_scene = rotation_matrix_x(self.scene_rot_x_deg)
-        self.bmin, self.bmax = rotate_aabb(bounds_min, bounds_max, self.R_scene)
+        self.r_scene = rotation_matrix_x(self.scene_rot_x_deg)
+
+        self.bmin, self.bmax = rotate_aabb(bounds_min, bounds_max, self.r_scene)
         self.center = ((self.bmin + self.bmax) / 2.0).astype(np.float32)
 
-        self.up = normalize(rotate_points(np.array([0.0, 1.0, 0.0], dtype=np.float32), self.R_scene))
+        # Basis vectors in the rotated "scene" frame
+        self.up = normalize(rotate_points(np.array([0.0, 1.0, 0.0], dtype=np.float32), self.r_scene))
+
         u0 = project_to_plane(np.array([1.0, 0.0, 0.0], dtype=np.float32), self.up)
         if np.linalg.norm(u0) < 1e-4:
             u0 = project_to_plane(np.array([0.0, 0.0, 1.0], dtype=np.float32), self.up)
+
         self.u = normalize(u0)
         self.v = normalize(np.cross(self.up, self.u).astype(np.float32))
 
-    def _create_bspline_path(self, keypoints, num_frames):
+    def _create_bspline_path(self, keypoints: np.ndarray, num_frames: int) -> np.ndarray:
         distances = np.cumsum(np.sqrt(np.sum(np.diff(keypoints, axis=0) ** 2, axis=1)))
         distances = np.insert(distances, 0, 0)
         t_norm = distances / distances[-1]
@@ -169,35 +199,41 @@ class FullBoundsTourGenerator:
             positions[:, i] = spline(t_new).astype(np.float32)
         return positions
 
-    def _smooth_positions(self, positions):
+    def _smooth_positions(self, positions: np.ndarray) -> np.ndarray:
         sm = positions.copy()
         for i in range(3):
             sm[:, i] = gaussian_filter1d(sm[:, i], sigma=1.0)
-            window = min(25, max(7, (len(sm) // 20) | 1))
+            window = min(25, max(7, (len(sm) // 20) | 1))  # keep odd window size
             if window >= 7 and window % 2 == 1:
                 sm[:, i] = savgol_filter(sm[:, i], window_length=window, polyorder=3)
         return sm.astype(np.float32)
 
-    def _smooth_quaternions(self, quaternions):
+    def _smooth_quaternions(self, quaternions: np.ndarray) -> np.ndarray:
         num_frames = len(quaternions)
         if num_frames < 10:
             return quaternions
+
         rotations = R.from_quat(quaternions)
         rotvecs = rotations.as_rotvec()
+
         sm = np.zeros_like(rotvecs)
         for k in range(3):
             sm[:, k] = gaussian_filter1d(rotvecs[:, k], sigma=1.5)
+
         sm_rots = R.from_rotvec(sm)
+
         key_int = max(1, num_frames // 25)
         key_idx = list(range(0, num_frames, key_int))
         if key_idx[-1] != num_frames - 1:
             key_idx.append(num_frames - 1)
+
         slerp = Slerp(key_idx, sm_rots[key_idx])
         final_rots = slerp(np.arange(num_frames))
         return final_rots.as_quat().astype(np.float32)
 
-    def compute_orientations_old(self, positions, look_at_points):
+    def compute_orientations_old(self, positions: np.ndarray, look_at_points: np.ndarray) -> np.ndarray:
         quats = np.zeros((len(positions), 4), dtype=np.float32)
+
         for i in range(len(positions)):
             forward = (look_at_points[i] - positions[i]).astype(np.float32)
             n = float(np.linalg.norm(forward))
@@ -213,19 +249,27 @@ class FullBoundsTourGenerator:
 
             up = np.cross(right, forward)
 
-            R_w_c = np.column_stack([right, up, -forward]).astype(np.float32)
-            quats[i] = R.from_matrix(R_w_c).as_quat().astype(np.float32)
+            r_w_c = np.column_stack([right, up, -forward]).astype(np.float32)
+            quats[i] = R.from_matrix(r_w_c).as_quat().astype(np.float32)
 
         quats = self._smooth_quaternions(quats)
         quats = enforce_quat_continuity_xyzw(quats)
         return quats
 
-    def generate(self, num_frames=1800, fps=30, inset=0.03, look_center_bias=0.30, seed=2):
+    def generate(
+        self,
+        num_frames: int = 1800,
+        fps: int = 30,
+        inset: float = 0.03,
+        look_center_bias: float = 0.30,
+        seed: int = 2,
+    ) -> Dict[str, np.ndarray]:
         rng = np.random.default_rng(int(seed))
 
         ext = (self.bmax - self.bmin).astype(np.float32)
         half_u = float(0.5 * max(ext[0], 1e-3))
         half_v = float(0.5 * max(ext[2], 1e-3))
+
         inset = float(np.clip(inset, 0.0, 0.25))
         half_u *= (1.0 - inset)
         half_v *= (1.0 - inset)
@@ -255,17 +299,19 @@ class FullBoundsTourGenerator:
             keypoints.append(p)
 
         keypoints = np.asarray(keypoints, dtype=np.float32)
-        keypoints = np.vstack([keypoints, keypoints[0]])
+        keypoints = np.vstack([keypoints, keypoints[0]])  # close the loop
 
         positions = self._create_bspline_path(keypoints, num_frames)
         positions = self._smooth_positions(positions)
 
         look_ahead = max(2, int(num_frames * 0.03))
         look = np.zeros_like(positions)
+
         for i in range(num_frames):
             j = min(i + look_ahead, num_frames - 1)
             forward_target = positions[j]
             look[i] = (1.0 - look_center_bias) * forward_target + look_center_bias * origin
+
         for k in range(3):
             look[:, k] = gaussian_filter1d(look[:, k], sigma=2)
 
@@ -281,7 +327,10 @@ class FullBoundsTourGenerator:
         }
 
 
-def write_twc(output_path, traj, sensor_height_m: float):
+# =============================================================================
+# Export / capture
+# =============================================================================
+def write_twc(output_path: str, traj: Dict[str, np.ndarray], sensor_height_m: float) -> None:
     """
     Export Twc but translate by a CONSTANT WORLD-UP offset (0, h, 0).
     This matches the rendered camera height without introducing rotation-coupled offset.
@@ -295,14 +344,14 @@ def write_twc(output_path, traj, sensor_height_m: float):
     with open(output_path, "w") as f:
         f.write("# format=T_wc camera=OpenCV quat=xyzw\n")
         f.write("# timestamp tx ty tz qx qy qz qw\n")
+
         for i in range(traj["num_frames"]):
             ts = float(traj["timestamps"][i])
             t_agent = traj["positions"][i].astype(np.float32)
             q_hab = normalize_quat_xyzw(traj["orientations_hab"][i])
 
-            # FIX: camera center = agent + constant world-up offset
+            # camera center = agent + constant world-up offset
             t_cam = (t_agent + offset_world).astype(np.float32)
-
             q_ocv = habitat_wc_quat_to_opencv_wc_quat(q_hab)
 
             f.write(
@@ -313,49 +362,31 @@ def write_twc(output_path, traj, sensor_height_m: float):
     print(f"[OK] Wrote: {output_path}")
 
 
-def main():
-    DATASET_CONFIG = "ThirdParty/Replica-Dataset/data/data/replica.scene_dataset_config.json"
-    SCENE_NAME = "room_0"
+@dataclass(frozen=True)
+class CaptureConfig:
+    dataset_config: str = "ThirdParty/Replica-Dataset/data/data/replica.scene_dataset_config.json"
+    scene_name: str = "room_0"
 
-    OUTPUT_DIR = "habitat_capture"
-    RGB_DIR = os.path.join(OUTPUT_DIR, "rgb")
-    DEPTH_DIR = os.path.join(OUTPUT_DIR, "depth")
-    os.makedirs(RGB_DIR, exist_ok=True)
-    os.makedirs(DEPTH_DIR, exist_ok=True)
+    output_dir: str = "habitat_capture"
+    width: int = 640
+    height: int = 480
+    hfov: float = 90.0
+    min_depth: float = 0.1
+    max_depth: float = 10.0
+    flip_rgb_vertical: bool = False
 
-    W, H = 640, 480
-    HFOV = 90.0
-    MIN_DEPTH, MAX_DEPTH = 0.1, 10.0
-    FLIP_RGB_VERTICAL = False
+    num_frames: int = 2000
+    fps: int = 30
 
-    NUM_FRAMES = 2000
-    FPS = 30
+    twc_out_name: str = "trajectory_twc_eye.txt"
 
-    TWC_OUT = os.path.join(OUTPUT_DIR, "trajectory_twc_eye.txt")
 
-    sim, agent = make_sim_and_agent(
-        dataset_config=DATASET_CONFIG,
-        scene_name=SCENE_NAME,
-        width=W,
-        height=H,
-        hfov_deg=HFOV,
-        min_depth=MIN_DEPTH,
-        max_depth=MAX_DEPTH,
-        sensor_height_m=SENSOR_HEIGHT_M,
-    )
-    print(f"[OK] Loaded scene: {SCENE_NAME}")
-    print(f"[INFO] Sensor height set to: {SENSOR_HEIGHT_M}m")
+def capture(sim: habitat_sim.Simulator, agent, traj: Dict[str, np.ndarray], cfg: CaptureConfig) -> None:
+    rgb_dir = os.path.join(cfg.output_dir, "rgb")
+    depth_dir = os.path.join(cfg.output_dir, "depth")
+    os.makedirs(rgb_dir, exist_ok=True)
+    os.makedirs(depth_dir, exist_ok=True)
 
-    bmin, bmax = estimate_bounds_from_navmesh(sim, num_samples=25000)
-
-    gen = FullBoundsTourGenerator(bounds_min=bmin, bounds_max=bmax, scene_rot_x_deg=SCENE_ROT_X_DEG)
-    traj = gen.generate(num_frames=NUM_FRAMES, fps=FPS, inset=0.03, look_center_bias=0.30, seed=2)
-    traj["orientations_hab"] = enforce_quat_continuity_xyzw(traj["orientations_hab"])
-
-    # Export Twc with constant world-up offset
-    write_twc(TWC_OUT, traj, sensor_height_m=SENSOR_HEIGHT_M)
-
-    # Capture
     for i in range(traj["num_frames"]):
         ts = float(traj["timestamps"][i])
         t_agent = traj["positions"][i].astype(np.float32)
@@ -367,17 +398,52 @@ def main():
         agent.set_state(state, reset_sensors=True)
 
         obs = sim.get_sensor_observations()
-        rgb = process_rgb(obs["rgb"], flip_vertical=FLIP_RGB_VERTICAL)
+        rgb = process_rgb(obs["rgb"], flip_vertical=cfg.flip_rgb_vertical)
         depth_m = obs["depth"].astype(np.float32)
-        if FLIP_RGB_VERTICAL:
+
+        if cfg.flip_rgb_vertical:
             depth_m = np.ascontiguousarray(depth_m[::-1, :])
 
         stamp = f"{ts:.6f}"
-        imageio.imwrite(os.path.join(RGB_DIR, f"{stamp}.png"), rgb)
-        imageio.imwrite(os.path.join(DEPTH_DIR, f"{stamp}.png"), (depth_m * 1000.0).astype(np.uint16))
+        imageio.imwrite(os.path.join(rgb_dir, f"{stamp}.png"), rgb)
+        imageio.imwrite(os.path.join(depth_dir, f"{stamp}.png"), (depth_m * 1000.0).astype(np.uint16))
 
         if i % 200 == 0:
             print(f"[INFO] Captured {i}/{traj['num_frames']}")
+
+
+def main() -> None:
+    cfg = CaptureConfig()
+
+    twc_out = os.path.join(cfg.output_dir, cfg.twc_out_name)
+
+    sim, agent = make_sim_and_agent(
+        dataset_config=cfg.dataset_config,
+        scene_name=cfg.scene_name,
+        width=cfg.width,
+        height=cfg.height,
+        hfov_deg=cfg.hfov,
+        min_depth=cfg.min_depth,
+        max_depth=cfg.max_depth,
+        sensor_height_m=SENSOR_HEIGHT_M,
+    )
+    print(f"[OK] Loaded scene: {cfg.scene_name}")
+    print(f"[INFO] Sensor height set to: {SENSOR_HEIGHT_M}m")
+
+    bmin, bmax = estimate_bounds_from_navmesh(sim, num_samples=25000)
+
+    gen = FullBoundsTourGenerator(bounds_min=bmin, bounds_max=bmax, scene_rot_x_deg=SCENE_ROT_X_DEG)
+    traj = gen.generate(
+        num_frames=cfg.num_frames,
+        fps=cfg.fps,
+        inset=0.03,
+        look_center_bias=0.30,
+        seed=2,
+    )
+    traj["orientations_hab"] = enforce_quat_continuity_xyzw(traj["orientations_hab"])
+
+    write_twc(twc_out, traj, sensor_height_m=SENSOR_HEIGHT_M)
+    capture(sim, agent, traj, cfg)
 
     sim.close()
     print("[DONE] Capture complete.")
