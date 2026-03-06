@@ -4,7 +4,7 @@ import time
 import cv2
 class DataLoader:
     
-    def __init__(self,rgb_path,depth_path = None,stream = False):
+    def __init__(self,rgb_path,depth_path = None):
         self._rgb_path = rgb_path
         self._depth_path = depth_path
 
@@ -17,7 +17,6 @@ class DataLoader:
         self.current_frame_index = 0
         self.current_keyframe_index = 0
         self._served_last_frame = False
-        self.stream = stream
         self._stream_start_time = -1
 
         #key frame
@@ -32,15 +31,6 @@ class DataLoader:
             print("Starting Stream...")
             self._stream_start_time = time.time()
 
-        # Non-stream mode: return next frame until finished
-        if not self.stream:
-            if self.current_frame_index >= len(self.RGBD_pairs):
-                return None
-            frame = self.RGBD_pairs[self.current_frame_index]
-            self.current_frame_index += 1
-            return frame
-
-        # Stream mode
         if self.current_frame_index >= len(self.RGBD_pairs):
             return None
 
@@ -62,8 +52,6 @@ class DataLoader:
         return len(self.RGBD_pairs)
     
     def load_data(self, limit=-1):
-        assert not self.stream, "The default load_data method does not support streaming mode"
-
         # Load file names in order
         rgb_sorted = sorted(os.listdir(self._rgb_path))
         depth_sorted = sorted(os.listdir(self._depth_path)) if self.isDepth else []

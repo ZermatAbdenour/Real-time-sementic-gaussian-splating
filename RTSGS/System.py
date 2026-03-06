@@ -10,11 +10,9 @@ import cv2
 import numpy as np
 
 class RTSGSSystem:
-    def __init__(self, dataset:DataLoader, tracker:Tracker,config, stream=False):
+    def __init__(self, dataset:DataLoader, tracker:Tracker,config):
         self.dataset = dataset
         self.tracker = tracker
-        self.stream = stream
-
 
         self._stop = False
         self._busy = False
@@ -35,8 +33,6 @@ class RTSGSSystem:
         
 
     def run(self):
-        if not self.stream:
-            return
 
         self._worker.start()
 

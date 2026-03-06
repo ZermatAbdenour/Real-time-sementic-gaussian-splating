@@ -4,8 +4,8 @@ from RTSGS.DataLoader.DataLoader import DataLoader
 import cv2
 
 class TUMDataLoader(DataLoader):
-    def __init__(self, rgb_path, depth_path=None, gt_path=None, stream=False):
-        super().__init__(rgb_path, depth_path, stream)
+    def __init__(self, rgb_path, depth_path=None, gt_path=None):
+        super().__init__(rgb_path, depth_path)
         self._gt_path = gt_path
 
         self.gt_timestamps = None

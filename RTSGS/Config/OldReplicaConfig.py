@@ -1,23 +1,24 @@
 from RTSGS.Config.Config import Config
 
+
 class ReplicaConfig(Config):
     def __init__(self, config_dict=None):
         super().__init__(config_dict)
 
-        self.set('fx', 600.0)
-        self.set('fy', 600.0)
-        self.set('cx', 599.5)
-        self.set('cy', 339.5)
+        self.set('fx', 320.0)
+        self.set('fy', 320.0)
+        self.set('cx', 319.5)
+        self.set('cy', 239.5)
 
-        self.set('width', 1200)
-        self.set('height', 680)
-        self.set('depth_scale', 6553.5) 
-
+        self.set('width', 640)
+        self.set('height', 480)
+        self.set('depth_scale', 1000.0)
         self.set('voxel_size', 0.02)
+
         self.set("sigma_px", 2.0)
         self.set("sigma_z0", 0.001)
         self.set("sigma_z1", 0.0)
         self.set("alpha_init", 1.0)
         self.set("alpha_min", 0.01)
         self.set("alpha_max", 1.0)
-        self.set("alpha_depth_scale", 0.0)
+        self.set("alpha_depth_scale", 0.)

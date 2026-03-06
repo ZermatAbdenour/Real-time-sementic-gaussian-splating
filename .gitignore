@@ -222,3 +222,4 @@ requirements.txt
 data/
 /ThirdParty/
 .vscode/
+logs/
